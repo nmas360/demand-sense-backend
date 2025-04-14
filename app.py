@@ -2,7 +2,7 @@ import os
 import json
 import jwt as pyjwt
 import uuid
-from flask import Flask, request, jsonify, send_file, session, redirect, url_for, Response
+from flask import Flask, request, jsonify, send_file, session, redirect, url_for, Response, g, make_response
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from flask_cors import CORS
@@ -915,17 +915,95 @@ def get_popular_products(current_user, cloud_project_id = None):
 
 @app.route("/api/categories", methods=["GET"])
 @token_required
-def get_categories(current_user):
+@project_access_required
+def get_categories(current_user, cloud_project_id=None):
     try:
+        # Get request parameters
+        country = request.args.get('country')
+        merchant_center_id = request.args.get('merchant_center_id')
+        
+        # Get date parameters if they exist (for bestseller filtering)
+        date_filter = request.args.get('date', None)
+        dates = request.args.getlist('dates[]')  # Get multiple dates as array
+
         # Get project_id parameter
         master_project_id = "s360-demand-sensing"
 
-        query = f"""
-        SELECT 
-            google_cat_id, 
-            level_1
-        FROM `{master_project_id}.ds_master_transformed_data.google_taxonomy`
-        """
+        # If we have cloud_project_id and merchant_center_id, use the enhanced query
+        if cloud_project_id and merchant_center_id:
+            # Build date filter clause for bestseller data
+            date_filter_clause = ""
+            if dates and len(dates) > 0:
+                date_strings = [f"'{date}'" for date in dates]
+                date_filter_clause = f"AND date_month IN ({', '.join(date_strings)})"
+            elif date_filter:
+                date_filter_clause = f"AND date_month = '{date_filter}'"
+            
+            query = f"""
+            WITH products AS (
+              SELECT *
+              FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
+              WHERE _PARTITIONTIME = (SELECT MAX(_PARTITIONTIME) FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`)
+              AND availability = 'in stock'
+              AND channel = 'online'
+            ),
+
+            bestseller_main AS (
+              SELECT DISTINCT
+                category,
+                entity_id
+              FROM `{master_project_id}.ds_master_transformed_data.bestseller_monthly`
+              WHERE 1=1 {date_filter_clause}
+            ),
+
+            mapping AS (
+              SELECT DISTINCT
+                m.entity_id,
+                m.product_id,
+                bm.category
+              FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}` AS m
+              LEFT JOIN bestseller_main AS bm
+              ON bm.entity_id = m.entity_id
+            ),
+
+            final AS (
+              SELECT
+                m.entity_id,
+                m.category,
+                p.* 
+              FROM products AS p
+              LEFT JOIN mapping AS m
+              ON p.product_id = m.product_id
+            ),
+            
+            category_counts AS (
+              SELECT
+                category AS level_1,
+                COUNT(DISTINCT entity_id) AS products_in_stock
+              FROM final
+              WHERE category IS NOT NULL
+              GROUP BY 1
+              ORDER BY 2 DESC
+            )
+            
+            SELECT DISTINCT
+                t.google_cat_id,
+                t.level_1,
+                COALESCE(c.products_in_stock, 0) AS count_products
+            FROM `{master_project_id}.ds_master_transformed_data.google_taxonomy` AS t
+            LEFT JOIN category_counts AS c
+            ON t.level_1 = c.level_1
+            ORDER BY count_products DESC, t.level_1 ASC
+            """
+        else:
+            # Fallback to original query if missing cloud_project_id or merchant_center_id
+            query = f"""
+            SELECT 
+                google_cat_id, 
+                level_1,
+                0 AS count_products
+            FROM `{master_project_id}.ds_master_transformed_data.google_taxonomy`
+            """
         
         # Execute the query
         query_job = bigquery_client.query(query)
@@ -933,13 +1011,20 @@ def get_categories(current_user):
         
         # Convert to dictionary for easy lookup of id->name
         categories = {}
+        # Create a dictionary to store category counts
+        category_counts = {}
+        
         for row in results:
             # Store keys as integers instead of strings
             categories[row.google_cat_id] = row.level_1
+            # Store the count for each category name
+            if row.level_1 not in category_counts or (row.count_products > category_counts[row.level_1]):
+                category_counts[row.level_1] = row.count_products
         
         # Create a list of unique level_1 category names for filtering
         distinct_categories = list(set(categories.values()))
-        distinct_categories.sort()
+        # Sort by product count descending, then alphabetically
+        distinct_categories.sort(key=lambda x: (-category_counts.get(x, 0), x))
         
         # Group category IDs by level_1 name
         categories_grouped = {}
@@ -951,7 +1036,8 @@ def get_categories(current_user):
         return jsonify({
             "categories": categories,
             "distinct_categories": distinct_categories,
-            "categories_grouped": categories_grouped
+            "categories_grouped": categories_grouped,
+            "category_counts": category_counts
         })
     except Exception as e:
         print(f"Error fetching categories: {str(e)}")
@@ -964,27 +1050,41 @@ def get_distinct_brands(current_user):
         # Get project_id parameter
         master_project_id = "s360-demand-sensing"
         
-        # Get filter parameters
-        categories = request.args.getlist('categories[]')
-        country = request.args.get('country')
+        # Get search parameter if provided
+        search_term = request.args.get('search', '')
         
-        # Use the optimized query with filters
-        categories_str = ', '.join([f"'{cat}'" for cat in categories])
-        query = f"""
-        SELECT brand 
-        FROM (
-            SELECT 
-            brand,
-            MIN(rank) AS min_rank
-            FROM `{master_project_id}.ds_master_transformed_data.bestseller_monthly`
-            WHERE category IN ({categories_str})
-            AND country_code = '{country}'
-            AND brand IS NOT NULL
-            GROUP BY brand
-        )
-        ORDER BY min_rank
-        LIMIT 500
-        """
+        # Modify query based on whether we have a search term
+        if search_term and len(search_term) >= 3:
+            # If search term provided, filter brands in the query
+            query = f"""
+            SELECT brand 
+            FROM (
+                SELECT 
+                brand,
+                MIN(rank) AS min_rank
+                FROM `{master_project_id}.ds_master_transformed_data.bestseller_monthly`
+                WHERE brand IS NOT NULL
+                AND LOWER(brand) LIKE LOWER('%{search_term}%')
+                GROUP BY brand
+            )
+            ORDER BY min_rank
+            LIMIT 200
+            """
+        else:
+            # If no search term or too short, return top brands only
+            query = f"""
+            SELECT brand 
+            FROM (
+                SELECT 
+                brand,
+                MIN(rank) AS min_rank
+                FROM `{master_project_id}.ds_master_transformed_data.bestseller_monthly`
+                WHERE brand IS NOT NULL
+                GROUP BY brand
+            )
+            ORDER BY min_rank
+            LIMIT 200
+            """
         
         # Execute the query
         query_job = bigquery_client.query(query)
@@ -2390,7 +2490,7 @@ def get_project_merchant_centers(current_user, project_id):
         
         # Extract merchant centers data
         merchant_centers = project_data.get("merchantCenters", [])
-        print(merchant_centers)
+
         # Return merchant centers with their codes and IDs
         return jsonify({
             "merchant_centers": merchant_centers,
