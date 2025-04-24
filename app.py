@@ -496,6 +496,26 @@ def get_popular_products(current_user, cloud_project_id = None):
             else:
                 category_filter_clause = "1=1"  # Always true if no category filter
             
+            # Add new filters for category_l2 and category_l3
+            category_l2_filter_clause = ""
+            categories_l2 = request.args.getlist('categories_l2[]')
+            if categories_l2 and len(categories_l2) > 0:
+                category_l2_strings = [f"'{category}'" for category in categories_l2]
+                category_l2_filter_clause = f"OR category_l2 IN ({', '.join(category_l2_strings)})"
+            else:
+                category_l2_filter_clause = ""
+                
+            category_l3_filter_clause = ""
+            categories_l3 = request.args.getlist('categories_l3[]')
+            if categories_l3 and len(categories_l3) > 0:
+                category_l3_strings = [f"'{category}'" for category in categories_l3]
+                category_l3_filter_clause = f"OR category_l3 IN ({', '.join(category_l3_strings)})"
+            else:
+                category_l3_filter_clause = ""
+            
+            # Combine category filters
+            combined_category_filter = f"({category_filter_clause} {category_l2_filter_clause} {category_l3_filter_clause})"
+            
             # Build the title filter part of the query
             title_filter_clause = ""
             if title_filter:
@@ -521,6 +541,8 @@ def get_popular_products(current_user, cloud_project_id = None):
                         country_code,
                         brand,
                         category,
+                        category_l2,
+                        category_l3,
                         report_category_id,
                         COUNT(DISTINCT date_month) AS month_count,
                         AVG(SAFE_CAST(rank AS FLOAT64)) AS avg_rank
@@ -528,9 +550,9 @@ def get_popular_products(current_user, cloud_project_id = None):
                       WHERE {date_filter_clause}
                       AND {country_filter_clause}
                       AND {brand_filter_clause}
-                      AND {category_filter_clause}
+                      AND {combined_category_filter}
                       AND {title_filter_clause}
-                      GROUP BY entity_id, title, country_code, brand, category, report_category_id
+                      GROUP BY entity_id, title, country_code, brand, category, category_l2, category_l3, report_category_id
                       HAVING COUNT(DISTINCT date_month) = {len(dates)}  -- Must appear in all selected months
                     ),
                     client_data AS (
@@ -569,6 +591,8 @@ def get_popular_products(current_user, cloud_project_id = None):
                       SELECT DISTINCT
                         months_data.report_category_id,
                         months_data.category,
+                        months_data.category_l2,
+                        months_data.category_l3,
                         months_data.entity_id,
                         months_data.title,
                         months_data.country_code,
@@ -597,15 +621,17 @@ def get_popular_products(current_user, cloud_project_id = None):
                         country_code,
                         brand,
                         category,
+                        category_l2,
+                        category_l3,
                         report_category_id,
                         AVG(SAFE_CAST(rank AS FLOAT64)) AS avg_rank
                       FROM `s360-demand-sensing.ds_master_transformed_data.bestseller_monthly`
                       WHERE {date_filter_clause}
                       AND {country_filter_clause}
                       AND {brand_filter_clause}
-                      AND {category_filter_clause}
+                      AND {combined_category_filter}
                       AND {title_filter_clause}
-                      GROUP BY entity_id, title, country_code, brand, category, report_category_id
+                      GROUP BY entity_id, title, country_code, brand, category, category_l2, category_l3, report_category_id
                     ),
                     client_data AS (
                       SELECT
@@ -643,6 +669,8 @@ def get_popular_products(current_user, cloud_project_id = None):
                       SELECT
                         months_data.report_category_id,
                         months_data.category,
+                        months_data.category_l2,
+                        months_data.category_l3,
                         months_data.entity_id,
                         months_data.title,
                         months_data.country_code,
@@ -668,6 +696,8 @@ def get_popular_products(current_user, cloud_project_id = None):
                   SELECT DISTINCT
                     report_category_id,
                     category,
+                    category_l2,
+                    category_l3,
                     entity_id,
                     title,
                     country_code,
@@ -678,7 +708,7 @@ def get_popular_products(current_user, cloud_project_id = None):
                   WHERE {date_filter_clause}
                   AND {country_filter_clause}
                   AND {brand_filter_clause}
-                  AND {category_filter_clause}
+                  AND {combined_category_filter}
                   AND {title_filter_clause}
                 ),
                 client_data AS (
@@ -717,6 +747,8 @@ def get_popular_products(current_user, cloud_project_id = None):
                   SELECT DISTINCT
                     main_bestseller.report_category_id,
                     main_bestseller.category,
+                    main_bestseller.category_l2,
+                    main_bestseller.category_l3,
                     main_bestseller.entity_id,
                     main_bestseller.title,
                     main_bestseller.country_code,
@@ -735,7 +767,7 @@ def get_popular_products(current_user, cloud_project_id = None):
                 """
 
             # Add inventory status filter if provided
-            query += "\nSELECT DISTINCT report_category_id, category, entity_id, title, country_code, brand, date_month, avg_rank, product_inventory_status FROM final_data"
+            query += "\nSELECT DISTINCT report_category_id, category, category_l2, category_l3, entity_id, title, country_code, brand, date_month, avg_rank, product_inventory_status FROM final_data"
             
             # Apply inventory status filter to main query if provided
             if inventory_statuses and len(inventory_statuses) > 0:
@@ -761,7 +793,7 @@ def get_popular_products(current_user, cloud_project_id = None):
                       WHERE {date_filter_clause}
                       AND {country_filter_clause}
                       AND {brand_filter_clause}
-                      AND {category_filter_clause}
+                      AND {combined_category_filter}
                       AND {title_filter_clause}
                       GROUP BY entity_id, country_code, brand
                       HAVING COUNT(DISTINCT date_month) = {len(dates)}  -- Must appear in all selected months
@@ -819,7 +851,7 @@ def get_popular_products(current_user, cloud_project_id = None):
                       WHERE {date_filter_clause}
                       AND {country_filter_clause}
                       AND {brand_filter_clause}
-                      AND {category_filter_clause}
+                      AND {combined_category_filter}
                       AND {title_filter_clause}
                       GROUP BY entity_id, country_code, brand
                     ),
@@ -878,7 +910,7 @@ def get_popular_products(current_user, cloud_project_id = None):
                   WHERE {date_filter_clause}
                   AND {country_filter_clause}
                   AND {brand_filter_clause}
-                  AND {category_filter_clause}
+                  AND {combined_category_filter}
                   AND {title_filter_clause}
                 ),
                 client_data AS (
@@ -930,7 +962,7 @@ def get_popular_products(current_user, cloud_project_id = None):
               COUNT(DISTINCT brand) as unique_brands_count
             FROM final_count
             """
-            
+
             # Add inventory status filter to count query if provided
             if inventory_statuses and len(inventory_statuses) > 0:
                 inventory_statuses_str = [f"'{status}'" for status in inventory_statuses]
@@ -950,6 +982,8 @@ def get_popular_products(current_user, cloud_project_id = None):
                 product = {
                     "report_category_id": row.report_category_id,
                     "category": row.category,
+                    "category_l2": row.category_l2,
+                    "category_l3": row.category_l3,
                     "entity_id": row.entity_id,
                     "title": row.title,
                     "country_code": row.country_code,
@@ -1011,9 +1045,16 @@ def get_categories(current_user, cloud_project_id=None):
             elif date_filter:
                 date_filter_clause = f"AND date_month = '{date_filter}'"
             
+            # Build country filter clause
+            country_filter_clause = ""
+            if country:
+                country_filter_clause = f"AND country_code = '{country}'"
+            
             query = f"""
             WITH products AS (
-              SELECT *
+              SELECT DISTINCT
+                offer_id,
+                product_id,
               FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
               WHERE _PARTITIONTIME = (SELECT MAX(_PARTITIONTIME) FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`)
               AND availability = 'in stock'
@@ -1025,7 +1066,7 @@ def get_categories(current_user, cloud_project_id=None):
                 category,
                 entity_id
               FROM `{master_project_id}.ds_master_transformed_data.bestseller_monthly`
-              WHERE 1=1 {date_filter_clause}
+              WHERE 1=1 {date_filter_clause} {country_filter_clause}
             ),
 
             mapping AS (
@@ -1114,6 +1155,79 @@ def get_categories(current_user, cloud_project_id=None):
     except Exception as e:
         print(f"Error fetching categories: {str(e)}")
         return jsonify({"error": f"Failed to fetch categories: {str(e)}"}), 500
+
+@app.route("/api/complete_category_hierarchy", methods=["GET"])
+@token_required
+@project_access_required
+def get_complete_category_hierarchy(current_user, cloud_project_id=None):
+    """Get a complete hierarchical structure of all categories"""
+    try:
+        # Get project ID
+        project_id = request.args.get('project_id')
+        if not project_id:
+            return jsonify({"error": "Missing project_id parameter"}), 400
+            
+        # Get merchant center ID
+        merchant_center_id = None
+        
+        # Try to find a merchant center from the project
+        project_ref = firestore_client.collection('client_projects').document(project_id)
+        project_doc = project_ref.get()
+        
+        if project_doc.exists:
+            project_data = project_doc.to_dict()
+            if project_data and project_data.get('merchantCenters') and len(project_data['merchantCenters']) > 0:
+                # Get first merchant center ID available
+                merchant_center_id = project_data['merchantCenters'][0].get('merchantCenterId')
+        
+        # Build the query to get the complete hierarchy
+        master_project_id = "s360-demand-sensing"
+        
+        # Use the merchant center ID if available
+        if cloud_project_id and merchant_center_id:
+            query = f"""
+            SELECT 
+            level_1,
+            level_2,
+            level_3
+            FROM `s360-demand-sensing.ds_master_transformed_data.google_taxonomy` 
+            """
+            
+        # Execute the query
+        query_job = bigquery_client.query(query)
+        results = query_job.result()
+        
+        # Build the hierarchical structure
+        hierarchy = {}
+        
+        for row in results:
+            level_1 = row.level_1
+            level_2 = row.level_2
+            level_3 = row.level_3
+            
+            # Add level 1 if not exists
+            if level_1 not in hierarchy:
+                hierarchy[level_1] = {}
+                
+            # Add level 2 if it exists and not already added
+            if level_2 and level_2 not in hierarchy[level_1]:
+                hierarchy[level_1][level_2] = {}
+                
+            # Add level 3 if it exists
+            if level_2 and level_3:
+                hierarchy[level_1][level_2][level_3] = True
+        
+        return jsonify({
+            "success": True,
+            "hierarchy": hierarchy
+        })
+        
+    except Exception as e:
+        print(f"Error fetching complete category hierarchy: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": f"Failed to fetch complete category hierarchy: {str(e)}"
+        }), 500
 
 @app.route("/api/brands", methods=["GET"])
 @token_required
@@ -3052,6 +3166,8 @@ def get_list_items(current_user, list_id):
                           SELECT DISTINCT
                             report_category_id,
                             category,
+                            category_l2,
+                            category_l3,
                             entity_id,
                             title,
                             country_code,
@@ -3098,6 +3214,8 @@ def get_list_items(current_user, list_id):
                         SELECT DISTINCT
                           main_bestseller.report_category_id,
                           main_bestseller.category,
+                          main_bestseller.category_l2,
+                          main_bestseller.category_l3,
                           main_bestseller.entity_id,
                           main_bestseller.title,
                           main_bestseller.country_code,
@@ -3125,6 +3243,8 @@ def get_list_items(current_user, list_id):
                                 product_details[row.entity_id] = {
                                     "report_category_id": row.report_category_id,
                                     "category": row.category,
+                                    "category_l2": row.category_l2,
+                                    "category_l3": row.category_l3,
                                     "entity_id": row.entity_id,
                                     "title": row.title,
                                     "country_code": row.country_code,
@@ -3227,6 +3347,8 @@ def get_list_items_with_gtins(current_user, list_id):
                           SELECT DISTINCT
                             report_category_id,
                             category,
+                            category_l2,
+                            category_l3,
                             entity_id,
                             title,
                             country_code,
@@ -3273,6 +3395,8 @@ def get_list_items_with_gtins(current_user, list_id):
                         SELECT DISTINCT
                           main_bestseller.report_category_id,
                           main_bestseller.category,
+                          main_bestseller.category_l2,
+                          main_bestseller.category_l3,
                           main_bestseller.entity_id,
                           main_bestseller.title,
                           main_bestseller.country_code,
@@ -3300,6 +3424,8 @@ def get_list_items_with_gtins(current_user, list_id):
                                 product_details[row.entity_id] = {
                                     "report_category_id": row.report_category_id,
                                     "category": row.category,
+                                    "category_l2": row.category_l2,
+                                    "category_l3": row.category_l3,
                                     "entity_id": row.entity_id,
                                     "title": row.title,
                                     "country_code": row.country_code,
@@ -3717,6 +3843,8 @@ def export_list_to_csv(current_user, list_id):
                           SELECT DISTINCT
                             report_category_id,
                             category,
+                            category_l2,
+                            category_l3,
                             entity_id,
                             title,
                             country_code,
@@ -3763,6 +3891,8 @@ def export_list_to_csv(current_user, list_id):
                         SELECT DISTINCT
                           main_bestseller.report_category_id,
                           main_bestseller.category,
+                          main_bestseller.category_l2,
+                          main_bestseller.category_l3,
                           main_bestseller.entity_id,
                           main_bestseller.title,
                           main_bestseller.country_code,
@@ -3790,6 +3920,8 @@ def export_list_to_csv(current_user, list_id):
                                 product_details[row.entity_id] = {
                                     "report_category_id": row.report_category_id,
                                     "category": row.category,
+                                    "category_l2": row.category_l2,
+                                    "category_l3": row.category_l3,
                                     "entity_id": row.entity_id,
                                     "title": row.title,
                                     "country_code": row.country_code,
@@ -4106,7 +4238,9 @@ def get_pricing_data(current_user, cloud_project_id = None):
         """
 
         # Execute the BQ query
-        client = bigquery.Client(project=cloud_project_id)
+        credentials_info = json.loads(BIGQUERY_SERVICE_ACCOUNT)
+        credentials = service_account.Credentials.from_service_account_info(credentials_info)
+        client = bigquery.Client(project=cloud_project_id, credentials=credentials)
         
         from concurrent.futures import ThreadPoolExecutor
         
@@ -4243,7 +4377,9 @@ def get_pricing_filters(current_user, cloud_project_id = None):
             }), 400
         
         # Create BigQuery client
-        client = bigquery.Client(project=cloud_project_id)
+        credentials_info = json.loads(BIGQUERY_SERVICE_ACCOUNT)
+        credentials = service_account.Credentials.from_service_account_info(credentials_info)
+        client = bigquery.Client(project=cloud_project_id, credentials=credentials)
         
         # Define query for min/max price
         min_max_price_query = f"""
