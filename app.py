@@ -493,28 +493,34 @@ def get_popular_products(current_user, cloud_project_id = None):
                 category_filter_clause = f"category IN ({', '.join(category_strings)})"
             elif category_filter:
                 category_filter_clause = f"category = '{category_filter}'"
-            else:
-                category_filter_clause = "1=1"  # Always true if no category filter
             
             # Add new filters for category_l2 and category_l3
             category_l2_filter_clause = ""
             categories_l2 = request.args.getlist('categories_l2[]')
             if categories_l2 and len(categories_l2) > 0:
                 category_l2_strings = [f"'{category}'" for category in categories_l2]
-                category_l2_filter_clause = f"OR category_l2 IN ({', '.join(category_l2_strings)})"
-            else:
-                category_l2_filter_clause = ""
-                
+                category_l2_filter_clause = f"category_l2 IN ({', '.join(category_l2_strings)})"
+            
             category_l3_filter_clause = ""
             categories_l3 = request.args.getlist('categories_l3[]')
             if categories_l3 and len(categories_l3) > 0:
                 category_l3_strings = [f"'{category}'" for category in categories_l3]
-                category_l3_filter_clause = f"OR category_l3 IN ({', '.join(category_l3_strings)})"
-            else:
-                category_l3_filter_clause = ""
+                category_l3_filter_clause = f"category_l3 IN ({', '.join(category_l3_strings)})"
             
             # Combine category filters
-            combined_category_filter = f"({category_filter_clause} {category_l2_filter_clause} {category_l3_filter_clause})"
+            filter_clauses = []
+            if category_filter_clause:
+                filter_clauses.append(category_filter_clause)
+            if category_l2_filter_clause:
+                filter_clauses.append(category_l2_filter_clause)
+            if category_l3_filter_clause:
+                filter_clauses.append(category_l3_filter_clause)
+                
+            # If no category filters are present, use a default true condition
+            if not filter_clauses:
+                combined_category_filter = "1=1"
+            else:
+                combined_category_filter = "(" + " OR ".join(filter_clauses) + ")"
             
             # Build the title filter part of the query
             title_filter_clause = ""
@@ -1001,6 +1007,7 @@ def get_popular_products(current_user, cloud_project_id = None):
                 total_count = row.total_count
                 unique_brands_count = row.unique_brands_count
                 break  # Only need the first row
+
 
         return jsonify({
             "products": products, 
@@ -4896,6 +4903,201 @@ def get_public_stream(stream_id):
     except Exception as e:
         print(f"Error generating stream XML: {str(e)}")
         return jsonify({"error": f"Failed to generate stream XML: {str(e)}"}), 500
+
+@app.route("/api/user/filter-presets", methods=["GET"])
+@token_required
+def get_user_filter_presets(current_user):
+    """Get the filter presets for the current user"""
+    user_email = current_user  # current_user is already the email string
+    
+    try:
+        # Get the user document from Firestore
+        user_ref = firestore_client.collection('users').document(user_email)
+        user_doc = user_ref.get()
+        
+        if not user_doc.exists:
+            return jsonify({
+                "success": False,
+                "error": "User document not found"
+            }), 404
+        
+        # Get the filter_presets array from the user document (default to empty list)
+        user_data = user_doc.to_dict()
+        filter_presets = user_data.get('filter_presets', [])
+        
+        return jsonify({
+            "success": True,
+            "data": {
+                "presets": filter_presets
+            }
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+@app.route("/api/user/filter-presets", methods=["POST"])
+@token_required
+def save_user_filter_preset(current_user):
+    """Save a new filter preset for the current user"""
+    user_email = current_user  # current_user is already the email string
+    
+    try:
+        # Get request data
+        data = request.get_json()
+        
+        if not data or not data.get('name') or not data.get('filters'):
+            return jsonify({
+                "success": False,
+                "error": "Missing required fields (name, filters)"
+            }), 400
+        
+        preset_name = data.get('name')
+        preset_filters = data.get('filters')
+        project_id = data.get('project_id')
+        
+        if not project_id:
+            return jsonify({
+                "success": False,
+                "error": "Missing project_id field"
+            }), 400
+        
+        # Log the received data for debugging
+        print(f"Saving filter preset for user: {user_email}")
+        print(f"Project ID: {project_id}")
+        print(f"Preset name: {preset_name}")
+        
+        # Ensure preset_filters is serializable by converting to dict if it's not already
+        # Also ensure all values in the filters are of simple types that Firestore can handle
+        if isinstance(preset_filters, dict):
+            # Make a clean copy with only the necessary filter fields
+            clean_filters = {
+                # Arrays for multiselect filters (ensure they're lists, not undefined)
+                'selectedMonths': preset_filters.get('selectedMonths', []),
+                'selectedCategories': preset_filters.get('selectedCategories', []),
+                'selectedCategoryL2': preset_filters.get('selectedCategoryL2', []),
+                'selectedCategoryL3': preset_filters.get('selectedCategoryL3', []),
+                'selectedBrands': preset_filters.get('selectedBrands', []),
+                'selectedCountries': preset_filters.get('selectedCountries', []),
+                'selectedInventoryStatuses': preset_filters.get('selectedInventoryStatuses', []),
+                
+                # String filters (ensure they're strings, not null)
+                'categoryFilter': preset_filters.get('categoryFilter', ''),
+                'titleFilter': preset_filters.get('titleFilter', ''),
+                'activeList': preset_filters.get('activeList', ''),
+                
+                # Mode settings
+                'timePeriodMode': preset_filters.get('timePeriodMode', 'strict'),
+                
+                # Search fields
+                'categorySearch': preset_filters.get('categorySearch', ''),
+                'brandSearch': preset_filters.get('brandSearch', ''),
+                'countrySearch': preset_filters.get('countrySearch', '')
+            }
+            preset_filters = clean_filters
+        
+        # Get the user document from Firestore
+        user_ref = firestore_client.collection('users').document(user_email)
+        user_doc = user_ref.get()
+        
+        if not user_doc.exists:
+            return jsonify({
+                "success": False,
+                "error": "User document not found"
+            }), 404
+        
+        # Generate a unique ID for the preset
+        preset_id = str(uuid.uuid4())
+        
+        # Use current timestamp instead of SERVER_TIMESTAMP
+        current_time = datetime.now().isoformat()
+        
+        # Create new preset object
+        new_preset = {
+            'id': preset_id,
+            'name': preset_name,
+            'filters': preset_filters,
+            'project_id': project_id,
+            'created_at': current_time  # Use string timestamp instead of SERVER_TIMESTAMP
+        }
+        
+        # Instead of using ArrayUnion which might have issues with complex objects,
+        # get current presets, append the new one, and update the whole array
+        user_data = user_doc.to_dict()
+        current_presets = user_data.get('filter_presets', [])
+        current_presets.append(new_preset)
+        
+        # Update the user document with the new array of presets
+        user_ref.update({
+            'filter_presets': current_presets
+        })
+        
+        return jsonify({
+            "success": True,
+            "data": {
+                "preset": new_preset
+            }
+        })
+    except Exception as e:
+        print(f"Error saving filter preset: {str(e)}")
+        print(f"Error details: {traceback.format_exc()}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+@app.route("/api/user/filter-presets/<preset_id>", methods=["DELETE"])
+@token_required
+def delete_user_filter_preset(current_user, preset_id):
+    """Delete a filter preset for the current user"""
+    user_email = current_user  # current_user is already the email string
+    
+    try:
+        # Get the user document from Firestore
+        user_ref = firestore_client.collection('users').document(user_email)
+        user_doc = user_ref.get()
+        
+        if not user_doc.exists:
+            return jsonify({
+                "success": False,
+                "error": "User document not found"
+            }), 404
+        
+        # Get the current filter_presets array
+        user_data = user_doc.to_dict()
+        filter_presets = user_data.get('filter_presets', [])
+        
+        # Find the preset to delete
+        preset_to_delete = None
+        for preset in filter_presets:
+            if preset.get('id') == preset_id:
+                preset_to_delete = preset
+                break
+        
+        if not preset_to_delete:
+            return jsonify({
+                "success": False,
+                "error": f"Preset with ID {preset_id} not found"
+            }), 404
+        
+        # Remove the preset from the array
+        updated_presets = [p for p in filter_presets if p.get('id') != preset_id]
+        
+        # Update the user document
+        user_ref.update({
+            'filter_presets': updated_presets
+        })
+        
+        return jsonify({
+            "success": True,
+            "message": f"Preset {preset_id} deleted successfully"
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=True)
