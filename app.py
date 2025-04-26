@@ -1981,7 +1981,10 @@ def create_merchant_transfer_with_sa(current_user):
 
 
         # First, create the dataset if it doesn't exist
-        bq_client = bigquery.Client(project=cloud_project_id)
+        # FIX: Use service account credentials here, just like other routes
+        credentials_info = json.loads(os.environ.get("BIGQUERY_SERVICE_ACCOUNT"))
+        credentials = service_account.Credentials.from_service_account_info(credentials_info)
+        bq_client = bigquery.Client(project=cloud_project_id, credentials=credentials)
         
         # Check if dataset exists
         try:
@@ -4809,7 +4812,11 @@ def get_public_stream(stream_id):
         """
 
         # Execute the BQ query
-        client = bigquery.Client(project=cloud_project_id)
+        # FIX: Use service account credentials here, just like in other routes
+        credentials_info = json.loads(BIGQUERY_SERVICE_ACCOUNT)
+        credentials = service_account.Credentials.from_service_account_info(credentials_info)
+        client = bigquery.Client(project=cloud_project_id, credentials=credentials)
+        
         query_job = client.query(query)
         results = query_job.result()
         
@@ -5098,6 +5105,276 @@ def delete_user_filter_preset(current_user, preset_id):
             "success": False,
             "error": str(e)
         }), 500
+
+@app.route("/api/admin/login-activity", methods=["GET"])
+@token_required_admin
+def get_login_activity(current_user):
+    """Get login activity data for admin dashboard visualizations"""
+    try:
+        # Get optional date range parameters
+        start_date = request.args.get('start_date', None)
+        end_date = request.args.get('end_date', None)
+        
+        # Get domain filters
+        domains = request.args.getlist('domains[]')
+        emails = request.args.getlist('emails[]')
+        exclude_s360 = request.args.get('exclude_s360', 'false').lower() == 'true'
+        
+        # Build query with optional date filtering
+        query = """
+        WITH login_entries AS (
+            SELECT 
+                date,
+                mail,
+                name,
+                REGEXP_EXTRACT(mail, r'@(.+)$') as domain
+            FROM `s360-demand-sensing.web_app_logs.web_app_logins`
+        """
+        
+        # Add date filters if provided
+        where_clauses = []
+        if start_date:
+            where_clauses.append(f"DATE(date) >= '{start_date}'")
+        if end_date:
+            where_clauses.append(f"DATE(date) <= '{end_date}'")
+            
+        # Add domain filters
+        if domains:
+            domains_str = ", ".join([f"'{domain}'" for domain in domains])
+            where_clauses.append(f"REGEXP_EXTRACT(mail, r'@(.+)$') IN ({domains_str})")
+            
+        # Add email filters
+        if emails:
+            emails_str = ", ".join([f"'{email}'" for email in emails])
+            where_clauses.append(f"mail IN ({emails_str})")
+        
+        # Add s360 exclusion
+        if exclude_s360:
+            where_clauses.append("REGEXP_EXTRACT(mail, r'@(.+)$') != 's360digital.com'")
+            
+        if where_clauses:
+            query += " WHERE " + " AND ".join(where_clauses)
+            
+        # Finish the CTE
+        query += """
+        )
+        SELECT 
+            date as login_date,
+            mail,
+            name,
+            domain,
+            COUNT(*) as login_count
+        FROM login_entries
+        GROUP BY login_date, mail, name, domain
+        ORDER BY login_date DESC, login_count DESC
+        """
+        
+        # Daily logins over time
+        daily_query = """
+        WITH logins AS (
+            SELECT 
+                DATE(date) as login_date,
+                mail,
+                REGEXP_EXTRACT(mail, r'@(.+)$') as domain
+            FROM `s360-demand-sensing.web_app_logs.web_app_logins`
+        """
+        
+        if where_clauses:
+            daily_query += " WHERE " + " AND ".join(where_clauses)
+            
+        daily_query += """
+        )
+        SELECT 
+            login_date,
+            COUNT(DISTINCT mail) as unique_users,
+            COUNT(*) as total_logins
+        FROM logins
+        GROUP BY login_date
+        ORDER BY login_date
+        """
+        
+        # Domain-based logins
+        domain_query = """
+        WITH logins AS (
+            SELECT 
+                mail,
+                REGEXP_EXTRACT(mail, r'@(.+)$') as domain
+            FROM `s360-demand-sensing.web_app_logs.web_app_logins`
+        """
+        
+        if where_clauses:
+            domain_query += " WHERE " + " AND ".join(where_clauses)
+            
+        domain_query += """
+        )
+        SELECT 
+            domain,
+            COUNT(DISTINCT mail) as unique_users,
+            COUNT(*) as total_logins
+        FROM logins
+        GROUP BY domain
+        ORDER BY total_logins DESC
+        LIMIT 10
+        """
+        
+        # Top users by login count
+        top_users_query = """
+        WITH logins AS (
+            SELECT 
+                mail,
+                name,
+                REGEXP_EXTRACT(mail, r'@(.+)$') as domain
+            FROM `s360-demand-sensing.web_app_logs.web_app_logins`
+        """
+        
+        if where_clauses:
+            top_users_query += " WHERE " + " AND ".join(where_clauses)
+            
+        top_users_query += """
+        )
+        SELECT 
+            mail,
+            name,
+            COUNT(*) as login_count
+        FROM logins
+        GROUP BY mail, name
+        ORDER BY login_count DESC
+        LIMIT 10
+        """
+        
+        # Get all domains for filtering
+        all_domains_query = """
+        SELECT DISTINCT 
+            REGEXP_EXTRACT(mail, r'@(.+)$') as domain,
+            COUNT(DISTINCT mail) as user_count
+        FROM `s360-demand-sensing.web_app_logs.web_app_logins`
+        GROUP BY domain
+        ORDER BY user_count DESC
+        """
+        
+        # Get all emails for filtering
+        all_emails_query = """
+        SELECT 
+            mail,
+            name,
+            COUNT(*) as login_count
+        FROM `s360-demand-sensing.web_app_logs.web_app_logins`
+        GROUP BY mail, name
+        ORDER BY login_count DESC
+        LIMIT 1000
+        """
+        
+        # Define functions to execute each query and process its results
+        def execute_login_data_query():
+            query_job = bigquery_client.query(query)
+            results = query_job.result()
+            
+            login_data = []
+            for row in results:
+                login_data.append({
+                    "date": row.login_date.isoformat() if row.login_date else None,
+                    "mail": row.mail,
+                    "name": row.name,
+                    "domain": row.domain,
+                    "login_count": row.login_count
+                })
+            return login_data
+        
+        def execute_daily_query():
+            daily_job = bigquery_client.query(daily_query)
+            daily_results = daily_job.result()
+            
+            daily_logins = []
+            for row in daily_results:
+                daily_logins.append({
+                    "date": row.login_date.isoformat() if row.login_date else None,
+                    "unique_users": row.unique_users,
+                    "total_logins": row.total_logins
+                })
+            return daily_logins
+        
+        def execute_domain_query():
+            domain_job = bigquery_client.query(domain_query)
+            domain_results = domain_job.result()
+            
+            domain_logins = []
+            for row in domain_results:
+                domain_logins.append({
+                    "domain": row.domain,
+                    "unique_users": row.unique_users,
+                    "total_logins": row.total_logins
+                })
+            return domain_logins
+        
+        def execute_top_users_query():
+            top_users_job = bigquery_client.query(top_users_query)
+            top_users_results = top_users_job.result()
+            
+            top_users = []
+            for row in top_users_results:
+                top_users.append({
+                    "mail": row.mail,
+                    "name": row.name,
+                    "login_count": row.login_count
+                })
+            return top_users
+        
+        def execute_all_domains_query():
+            all_domains_job = bigquery_client.query(all_domains_query)
+            all_domains_results = all_domains_job.result()
+            
+            all_domains = []
+            for row in all_domains_results:
+                all_domains.append({
+                    "domain": row.domain,
+                    "user_count": row.user_count
+                })
+            return all_domains
+        
+        def execute_all_emails_query():
+            all_emails_job = bigquery_client.query(all_emails_query)
+            all_emails_results = all_emails_job.result()
+            
+            all_emails = []
+            for row in all_emails_results:
+                all_emails.append({
+                    "email": row.mail,
+                    "name": row.name,
+                    "login_count": row.login_count
+                })
+            return all_emails
+        
+        # Use ThreadPoolExecutor to run all queries concurrently
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            login_data_future = executor.submit(execute_login_data_query)
+            daily_future = executor.submit(execute_daily_query)
+            domain_future = executor.submit(execute_domain_query)
+            top_users_future = executor.submit(execute_top_users_query)
+            all_domains_future = executor.submit(execute_all_domains_query)
+            all_emails_future = executor.submit(execute_all_emails_query)
+            
+            # Wait for all queries to complete and get results
+            login_data = login_data_future.result()
+            daily_logins = daily_future.result()
+            domain_logins = domain_future.result()
+            top_users = top_users_future.result()
+            all_domains = all_domains_future.result()
+            all_emails = all_emails_future.result()
+        
+        return jsonify({
+            "success": True,
+            "login_data": login_data,
+            "daily_logins": daily_logins,
+            "domain_logins": domain_logins,
+            "top_users": top_users,
+            "all_domains": [d["domain"] for d in all_domains],
+            "all_emails": [e["email"] for e in all_emails],
+            "login_entries": login_data
+        })
+        
+    except Exception as e:
+        print(f"Error fetching login activity: {str(e)}")
+        return jsonify({"error": f"Failed to fetch login activity: {str(e)}"}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=True)
