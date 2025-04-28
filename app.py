@@ -968,7 +968,7 @@ def get_popular_products(current_user, cloud_project_id = None):
               COUNT(DISTINCT brand) as unique_brands_count
             FROM final_count
             """
-
+            print(query)
             # Add inventory status filter to count query if provided
             if inventory_statuses and len(inventory_statuses) > 0:
                 inventory_statuses_str = [f"'{status}'" for status in inventory_statuses]
@@ -4246,14 +4246,12 @@ def get_pricing_data(current_user, cloud_project_id = None):
           {product_type_l3_clause}
           {price_filter_clause}
         """
-
+        print(query)
         # Execute the BQ query
         credentials_info = json.loads(BIGQUERY_SERVICE_ACCOUNT)
         credentials = service_account.Credentials.from_service_account_info(credentials_info)
         client = bigquery.Client(project=cloud_project_id, credentials=credentials)
-        
-        from concurrent.futures import ThreadPoolExecutor
-        
+
         # Execute main and count queries concurrently
         with ThreadPoolExecutor(max_workers=2) as executor:
             query_future = executor.submit(client.query, query)
