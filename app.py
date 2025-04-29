@@ -968,7 +968,7 @@ def get_popular_products(current_user, cloud_project_id = None):
               COUNT(DISTINCT brand) as unique_brands_count
             FROM final_count
             """
-            print(query)
+
             # Add inventory status filter to count query if provided
             if inventory_statuses and len(inventory_statuses) > 0:
                 inventory_statuses_str = [f"'{status}'" for status in inventory_statuses]
@@ -2146,19 +2146,32 @@ def create_merchant_transfer_with_sa(current_user):
             logging.warning(f"Initial transfer creation failed: {error_message}")
             
             # Check for the specific error about service account token creator permission
-            if ("service-" in error_message and 
-                "does not have the permission" in error_message and 
-                "serviceAccount" in error_message and 
-                "iam.serviceAccountTokenCreator" in error_message):
+            # Improved pattern matching for various error formats
+            if (("serviceAccount" in error_message and "serviceAccountTokenCreator" in error_message) or
+                ("serviceAccounts.getAccessToken permission" in error_message) or
+                ("iam.serviceAccounts.getAccessToken permission" in error_message) or
+                ("DTS service agent needs iam.serviceAccounts.getAccessToken permission" in error_message)):
                 
-                # Extract the service agent email from the error message
-                service_agent_match = None
+                # Extract the service agent email from the error message using multiple patterns
+                service_agent_email = None
                 
                 # Try to match the pattern: service-PROJECT_NUMBER@gcp-sa-bigquerydatatransfer.iam.gserviceaccount.com
                 service_agent_match = re.search(r'(service-\d+@gcp-sa-bigquerydatatransfer\.iam\.gserviceaccount\.com)', error_message)
                 
                 if service_agent_match:
                     service_agent_email = service_agent_match.group(1)
+                else:
+                    # Try another pattern often seen in the error message
+                    service_agent_match = re.search(r'serviceAccount:([^\'"\s]+)', error_message)
+                    if service_agent_match:
+                        service_agent_email = service_agent_match.group(1)
+                    else:
+                        # Try to extract from the suggested command line
+                        cmd_match = re.search(r'--member=\'serviceAccount:([^\']+)\'', error_message)
+                        if cmd_match:
+                            service_agent_email = cmd_match.group(1)
+                
+                if service_agent_email:
                     logging.info(f"Extracted service agent email: {service_agent_email}")
                     
                     # Add IAM binding to allow the service agent to impersonate our service account
@@ -2217,8 +2230,8 @@ def create_merchant_transfer_with_sa(current_user):
                             
                             logging.info(f"Added IAM binding for {service_agent_email}")
                             
-                            # Wait a bit for the policy to propagate
-                            time.sleep(2)
+                            # Wait for the policy to propagate - Google IAM changes can take time
+                            time.sleep(20)  # Increased from 2 to 20 seconds to allow for IAM propagation
                             
                             # Retry creating the transfer
                             try:
@@ -2243,8 +2256,8 @@ def create_merchant_transfer_with_sa(current_user):
                         # Re-raise the original error if we couldn't fix it
                         raise transfer_error
                 else:
-                    # Couldn't extract the service agent email, re-raise the original error
-                    logging.error("Could not extract service agent email from error message")
+                    # Couldn't extract the service agent email, log the error message for debugging
+                    logging.error(f"Could not extract service agent email from error message: {error_message}")
                     raise transfer_error
             else:
                 # Not the specific error we're looking for, re-raise
@@ -2336,15 +2349,23 @@ def create_merchant_transfer_with_sa(current_user):
         error_message = str(e)
         logging.error(f"Error creating data transfer: {error_message}")
         
-        # Check for specific error conditions
-        if "serviceAccounts.getAccessToken permission" in error_message or "iam.serviceAccounts.getAccessToken permission" in error_message or ("doesn't exist" in error_message and "service agent" in error_message):
-            return jsonify({
-                "success": False, 
-                "error": "The Data Transfer Service needs permission to use the service account. Please add the 'Service Account Token Creator' role to s360-demand-sensing-connector@s360-demand-sensing.iam.gserviceaccount.com.",
-                "error_details": error_message,
-                "missing_permission": "token_creator"
-            }), 400
-        elif "dataset" in error_message.lower() and "not found" in error_message.lower():
+        # Special handling for service account token permission errors
+        if "serviceAccounts.getAccessToken permission" in error_message or "iam.serviceAccounts.getAccessToken permission" in error_message:
+            # Extract the service agent email from the error message for client information
+            service_agent_match = re.search(r'(service-\d+@gcp-sa-bigquerydatatransfer\.iam\.gserviceaccount\.com)', error_message)
+            
+            if service_agent_match:
+                service_agent_email = service_agent_match.group(1)
+                return jsonify({
+                    "success": False, 
+                    "error": "Failed to add required permissions automatically. Please try again.",
+                    "error_details": error_message,
+                    "service_agent_email": service_agent_email,
+                    "missing_permission": "token_creator"
+                }), 400
+        
+        # Check for other specific error conditions
+        if "dataset" in error_message.lower() and "not found" in error_message.lower():
             return jsonify({
                 "success": False, 
                 "error": f"Dataset '{dataset_id}' could not be created. Please check permissions.",
@@ -4246,7 +4267,7 @@ def get_pricing_data(current_user, cloud_project_id = None):
           {product_type_l3_clause}
           {price_filter_clause}
         """
-        print(query)
+
         # Execute the BQ query
         credentials_info = json.loads(BIGQUERY_SERVICE_ACCOUNT)
         credentials = service_account.Credentials.from_service_account_info(credentials_info)
@@ -5373,6 +5394,744 @@ def get_login_activity(current_user):
     except Exception as e:
         print(f"Error fetching login activity: {str(e)}")
         return jsonify({"error": f"Failed to fetch login activity: {str(e)}"}), 500
+
+@app.route("/api/data/datapoints-count", methods=["GET"])
+@token_required
+def get_datapoints_count(current_user):
+    """
+    Get the count of historical datapoints from BestSellersProductClusterMonthly
+    """
+    try:
+        # Query to count rows in the BestSellersProductClusterMonthly table
+        query = """
+            SELECT COUNT(*) as count 
+            FROM `s360-demand-sensing.ds_master_raw_data.BestSellersProductClusterMonthly_11097323`
+        """
+        
+        query_job = bigquery_client.query(query)
+        results = query_job.result()
+        
+        # Get the count from the result
+        row = list(results)[0]
+        count = row.count
+        
+        return jsonify({
+            "count": count
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/data/categories-count", methods=["GET"])
+@token_required
+def get_categories_count(current_user):
+    """
+    Get the count of categories from the google_taxonomy table
+    """
+    try:
+        # Query to count unique categories in the taxonomy table
+        query = """
+            SELECT COUNT(*) as count
+            FROM `s360-demand-sensing.ds_master_transformed_data.google_taxonomy`
+        """
+        
+        query_job = bigquery_client.query(query)
+        results = query_job.result()
+        
+        # Get the count from the result
+        row = list(results)[0]
+        count = row.count
+        
+        return jsonify({
+            "count": count
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/data/current-countries", methods=["GET"])
+@token_required
+def get_current_countries(current_user):
+    """
+    Get the current countries from the latest bestseller_monthly data partition
+    """
+    try:
+        # Query to get the current countries from the latest partition
+        query = """
+            DECLARE latest_partition DATE DEFAULT (
+              SELECT PARSE_DATE('%Y%m%d', partition_id)
+              FROM  `s360-demand-sensing.ds_master_transformed_data.INFORMATION_SCHEMA.PARTITIONS`
+              WHERE table_name = 'bestseller_monthly'
+              ORDER BY partition_id DESC
+              LIMIT 1
+            );
+
+            SELECT DISTINCT
+              country_code
+            FROM   `s360-demand-sensing.ds_master_transformed_data.bestseller_monthly`
+            WHERE  date_month = latest_partition;
+        """
+        
+        query_job = bigquery_client.query(query)
+        results = query_job.result()
+        
+        # Convert to list
+        countries = [row.country_code for row in results]
+        
+        return jsonify({
+            "countries": countries
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/data/available-categories", methods=["GET"])
+@token_required
+def get_available_categories(current_user):
+    """Get all available categories from google_taxonomy table."""
+    try:
+        client = bigquery.Client()
+        query = """
+            SELECT category 
+            FROM `s360-demand-sensing.ds_master_transformed_data.google_taxonomy` 
+            ORDER BY category
+        """
+        query_job = client.query(query)
+        results = query_job.result()
+        
+        categories = [row.category for row in results]
+        
+        return jsonify({"categories": categories})
+    except Exception as e:
+        logging.error(f"Error fetching available categories: {e}")
+        return jsonify({"error": "Failed to fetch categories"}), 500
+
+
+@app.route("/api/admin/category-assortment-analysis", methods=["GET"])
+def analyze_category_assortment(current_user=""):
+    """
+    Admin endpoint to analyze all projects and merchant centers,
+    finding the categories with the most products in assortment.
+    This endpoint is secured with a scheduler token and is meant to be called only by Google Cloud Scheduler.
+    """
+    # Check for the scheduler token in the Authorization header
+    scheduler_token = os.environ.get("SCHEDULER_TOKEN")
+    if not scheduler_token:
+        logging.error("SCHEDULER_TOKEN environment variable is not set")
+        return jsonify({"error": "Server configuration error"}), 500
+        
+    auth_header = request.headers.get("Authorization")
+    expected_auth = f"Bearer {scheduler_token}"
+    
+    if not auth_header or auth_header != expected_auth:
+        logging.warning("Unauthorized attempt to access category assortment analysis")
+        return jsonify({"error": "Unauthorized"}), 401
+        
+    try:
+        # Get all client projects from Firestore
+        projects_ref = firestore_client.collection('client_projects')
+        projects = list(projects_ref.stream())
+        
+        results = []
+        log_rows_to_insert = []  # For BigQuery logging
+        analysis_timestamp = datetime.now()
+        
+        # Get the most recent date available for bestseller data
+        master_project_id = "s360-demand-sensing"
+        most_recent_date_query = f"""
+        SELECT MAX(date_month) as latest_date
+        FROM `{master_project_id}.ds_master_transformed_data.bestseller_monthly`
+        """
+        most_recent_job = bigquery_client.query(most_recent_date_query)
+        most_recent_results = list(most_recent_job.result())
+        
+        # Default to most recent date
+        most_recent_date = None
+        if most_recent_results and hasattr(most_recent_results[0], 'latest_date'):
+            most_recent_date = most_recent_results[0].latest_date.isoformat()
+        
+        # Create BigQuery dataset and table if they don't exist
+        try:
+            # First, make sure the dataset exists
+            dataset_ref = bigquery_client.dataset("web_app_logs", project=master_project_id)
+            try:
+                bigquery_client.get_dataset(dataset_ref)
+            except NotFound:
+                # Create the dataset if it doesn't exist
+                dataset = bigquery.Dataset(dataset_ref)
+                dataset.location = "EU"  # Set your preferred location
+                bigquery_client.create_dataset(dataset)
+                
+            # Check if table exists, create if it doesn't
+            table_id = f"{master_project_id}.web_app_logs.category_assortment_analysis"
+            table_ref = bigquery_client.dataset("web_app_logs").table("category_assortment_analysis")
+            
+            try:
+                bigquery_client.get_table(table_ref)
+            except NotFound:
+                # Define schema
+                schema = [
+                    bigquery.SchemaField("timestamp", "TIMESTAMP", mode="REQUIRED"),
+                    bigquery.SchemaField("merchant_center_date", "DATE", mode="REQUIRED"),
+                    bigquery.SchemaField("project_id", "STRING", mode="REQUIRED"),
+                    bigquery.SchemaField("project_name", "STRING", mode="REQUIRED"),
+                    bigquery.SchemaField("cloud_project_id", "STRING", mode="REQUIRED"),
+                    bigquery.SchemaField("merchant_center_id", "STRING", mode="REQUIRED"),
+                    bigquery.SchemaField("country_code", "STRING", mode="REQUIRED"),
+                    bigquery.SchemaField("category", "STRING", mode="NULLABLE"),
+                    bigquery.SchemaField("is_top_category", "BOOLEAN", mode="NULLABLE"),
+                    bigquery.SchemaField("products_in_stock", "INTEGER", mode="NULLABLE"),
+                    bigquery.SchemaField("total_products", "INTEGER", mode="NULLABLE"),
+                    bigquery.SchemaField("share_percentage", "FLOAT", mode="NULLABLE"),
+                    bigquery.SchemaField("bestseller_date", "DATE", mode="NULLABLE")
+                ]
+                
+                table = bigquery.Table(table_ref, schema=schema)
+                table.time_partitioning = bigquery.TimePartitioning(
+                    type_=bigquery.TimePartitioningType.DAY,
+                    field="merchant_center_date"
+                )
+                table = bigquery_client.create_table(table)
+                print(f"Created table {table.project}.{table.dataset_id}.{table.table_id}")
+                
+        except Exception as table_error:
+            print(f"Error creating/checking BigQuery table: {str(table_error)}")
+            # Continue processing even if table creation fails
+        
+        for project_doc in projects:
+            project_data = project_doc.to_dict()
+            project_id = project_doc.id
+            cloud_project_id = project_data.get('cloudProjectId')
+            merchant_centers = project_data.get('merchantCenters', [])
+            
+            # Skip if no cloud project ID or merchant centers
+            if not cloud_project_id or not merchant_centers:
+                continue
+                
+            project_result = {
+                "project_id": project_id,
+                "project_name": project_data.get('name', 'Unknown'),
+                "cloud_project_id": cloud_project_id,
+                "merchant_centers": []
+            }
+            
+            # Process each merchant center
+            for merchant_center in merchant_centers:
+                merchant_center_id = merchant_center.get('merchantCenterId')
+                country_code = merchant_center.get('code')
+                
+                if not merchant_center_id or not country_code:
+                    continue
+                
+                try:
+                    # Use similar query to get_categories but modified to return ALL categories with products in stock
+                    
+                    # Add date filter matching what frontend uses - this is crucial for matching counts
+                    date_filter_clause = ""
+                    if most_recent_date:
+                        date_filter_clause = f"AND date_month = '{most_recent_date}'"
+                    
+                    query = f"""
+                    WITH products AS (
+                      SELECT DISTINCT
+                        offer_id,
+                        product_id
+                      FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
+                      WHERE _PARTITIONTIME = (SELECT MAX(_PARTITIONTIME) FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`)
+                      AND availability = 'in stock'
+                      AND channel = 'online'
+                    ),
+
+                    bestseller_main AS (
+                      SELECT DISTINCT
+                        category,
+                        entity_id
+                      FROM `{master_project_id}.ds_master_transformed_data.bestseller_monthly`
+                      WHERE country_code = '{country_code}'
+                      {date_filter_clause}
+                    ),
+                    
+                    total_bestseller_counts AS (
+                      SELECT
+                        category,
+                        COUNT(DISTINCT entity_id) AS total_products
+                      FROM `{master_project_id}.ds_master_transformed_data.bestseller_monthly`
+                      WHERE country_code = '{country_code}'
+                      {date_filter_clause}
+                      AND category IS NOT NULL
+                      GROUP BY category
+                    ),
+
+                    mapping AS (
+                      SELECT DISTINCT
+                        m.entity_id,
+                        m.product_id,
+                        bm.category
+                      FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}` AS m
+                      LEFT JOIN bestseller_main AS bm
+                      ON bm.entity_id = m.entity_id
+                    ),
+
+                    final AS (
+                      SELECT
+                        m.entity_id,
+                        m.category,
+                        p.* 
+                      FROM products AS p
+                      LEFT JOIN mapping AS m
+                      ON p.product_id = m.product_id
+                    ),
+                    
+                    category_counts AS (
+                      SELECT
+                        c.category AS level_1,
+                        COUNT(DISTINCT c.entity_id) AS products_in_stock,
+                        t.total_products,
+                        SAFE_DIVIDE(COUNT(DISTINCT c.entity_id), t.total_products) AS share_of_total
+                      FROM final c
+                      JOIN total_bestseller_counts t
+                      ON c.category = t.category
+                      WHERE c.category IS NOT NULL
+                      GROUP BY c.category, t.total_products
+                      ORDER BY products_in_stock DESC
+                    )
+                    
+                    SELECT 
+                        c.level_1,
+                        c.products_in_stock,
+                        c.total_products,
+                        c.share_of_total
+                    FROM category_counts AS c
+                    WHERE c.products_in_stock > 0
+                    ORDER BY c.products_in_stock DESC
+                    """
+                    
+                    # Execute the query
+                    query_job = bigquery_client.query(query)
+                    results_rows = list(query_job.result())
+                    
+                    # If there are categories with products in stock
+                    if results_rows:
+                        # Find top category for summary
+                        top_category = results_rows[0].level_1
+                        top_products_count = results_rows[0].products_in_stock
+                        top_total_products = results_rows[0].total_products
+                        top_share_percentage = round(results_rows[0].share_of_total * 100, 2) if results_rows[0].share_of_total else 0
+                        
+                        # Add merchant center summary to result (using top category for summary)
+                        merchant_result = {
+                            "merchant_center_id": merchant_center_id,
+                            "country_code": country_code,
+                            "top_category": top_category,
+                            "products_in_stock": top_products_count,
+                            "total_products": top_total_products,
+                            "share_of_total": top_share_percentage,
+                            "date_used": most_recent_date,
+                            "categories_count": len(results_rows)
+                        }
+                        
+                        # Process all categories
+                        for row in results_rows:
+                            category = row.level_1
+                            products_count = row.products_in_stock
+                            total_products = row.total_products
+                            share_of_total = row.share_of_total
+                            share_percentage = round(share_of_total * 100, 2) if share_of_total else 0
+                            
+                            # Prepare data for BigQuery insert for this category
+                            bq_row = {
+                                "timestamp": analysis_timestamp.strftime('%Y-%m-%d %H:%M:%S'),
+                                "merchant_center_date": analysis_timestamp.strftime('%Y-%m-%d'),
+                                "project_id": project_id,
+                                "project_name": project_data.get('name', 'Unknown'),
+                                "cloud_project_id": cloud_project_id,
+                                "merchant_center_id": merchant_center_id,
+                                "country_code": country_code,
+                                "category": category,
+                                "is_top_category": (category == top_category),
+                                "products_in_stock": products_count,
+                                "total_products": total_products,
+                                "share_percentage": share_percentage,
+                                "bestseller_date": most_recent_date
+                            }
+                            log_rows_to_insert.append(bq_row)
+                    else:
+                        # No categories with products in stock
+                        merchant_result = {
+                            "merchant_center_id": merchant_center_id,
+                            "country_code": country_code,
+                            "top_category": None,
+                            "products_in_stock": 0,
+                            "total_products": 0,
+                            "share_of_total": 0,
+                            "date_used": most_recent_date,
+                            "categories_count": 0
+                        }
+                    
+                    project_result["merchant_centers"].append(merchant_result)
+                    
+                except Exception as mc_error:
+                    # Log error but continue with next merchant center
+                    print(f"Error processing merchant center {merchant_center_id}: {str(mc_error)}")
+                    merchant_result = {
+                        "merchant_center_id": merchant_center_id,
+                        "country_code": country_code,
+                        "error": str(mc_error)
+                    }
+                    project_result["merchant_centers"].append(merchant_result)
+            
+            # Only add project to results if at least one merchant center was processed
+            if project_result["merchant_centers"]:
+                results.append(project_result)
+        
+        # Insert data into BigQuery
+        if log_rows_to_insert:
+            try:
+                table_id = f"{master_project_id}.web_app_logs.category_assortment_analysis"
+                errors = bigquery_client.insert_rows_json(table_id, log_rows_to_insert)
+                if errors:
+                    print(f"Encountered errors while inserting rows: {errors}")
+                else:
+                    print(f"Successfully inserted {len(log_rows_to_insert)} rows into {table_id}")
+            except Exception as insert_error:
+                print(f"Error inserting data into BigQuery: {str(insert_error)}")
+        
+        # Return the analysis results
+        return jsonify({
+            "success": True,
+            "timestamp": analysis_timestamp.isoformat(),
+            "date_used_for_filtering": most_recent_date,
+            "results": results,
+            "logged_categories_count": len(log_rows_to_insert),
+            "logged_to_bigquery": len(log_rows_to_insert) > 0
+        })
+        
+    except Exception as e:
+        print(f"Error analyzing category assortment: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": f"Failed to analyze category assortment: {str(e)}"
+        }), 500
+
+
+
+
+#@app.route("/api/admin/category-assortment-backfill", methods=["GET"])
+#def backfill_category_assortment(current_user=""):
+#    """
+#    Admin endpoint to backfill category assortment analysis for all historical dates
+#    using current merchant center data.
+#    """
+#    try:
+#        # Get all client projects from Firestore
+#        projects_ref = firestore_client.collection('client_projects')
+#        projects = list(projects_ref.stream())
+#        
+#        # Track results
+#        backfill_results = {
+#            "projects_processed": 0,
+#            "merchant_centers_processed": 0,
+#            "dates_processed": 0,
+#            "total_rows_inserted": 0,
+#            "errors": []
+#        }
+#        
+#        log_rows_to_insert = []  # For BigQuery logging
+#        analysis_timestamp = datetime.now()
+#        
+#        # Get all available dates from bestseller data
+#        master_project_id = "s360-demand-sensing"
+#        dates_query = f"""
+#        SELECT DISTINCT date_month
+#        FROM `{master_project_id}.ds_master_transformed_data.bestseller_monthly`
+#        WHERE date_month IS NOT NULL
+#        ORDER BY date_month DESC
+#        """
+#        
+#        dates_job = bigquery_client.query(dates_query)
+#        dates_results = list(dates_job.result())
+#        available_dates = [row.date_month.isoformat() for row in dates_results]
+#        
+#        if not available_dates:
+#            return jsonify({
+#                "success": False,
+#                "error": "No dates available in bestseller data"
+#            }), 400
+#            
+#        backfill_results["available_dates"] = len(available_dates)
+#        
+#        # Create table if needed (same schema as in the main function)
+#        try:
+#            # First, make sure the dataset exists
+#            dataset_ref = bigquery_client.dataset("web_app_logs", project=master_project_id)
+#            try:
+#                bigquery_client.get_dataset(dataset_ref)
+#            except NotFound:
+#                # Create the dataset if it doesn't exist
+#                dataset = bigquery.Dataset(dataset_ref)
+#                dataset.location = "EU"
+#                bigquery_client.create_dataset(dataset)
+#                
+#            # Check if table exists, create if it doesn't
+#            table_id = f"{master_project_id}.web_app_logs.category_assortment_analysis"
+#            table_ref = bigquery_client.dataset("web_app_logs").table("category_assortment_analysis")
+#            
+#            try:
+#                bigquery_client.get_table(table_ref)
+#            except NotFound:
+#                # Define schema
+#                schema = [
+#                    bigquery.SchemaField("timestamp", "TIMESTAMP", mode="REQUIRED"),
+#                    bigquery.SchemaField("merchant_center_date", "DATE", mode="REQUIRED"),
+#                    bigquery.SchemaField("bestseller_date", "DATE", mode="NULLABLE"),
+#                    bigquery.SchemaField("project_id", "STRING", mode="REQUIRED"),
+#                    bigquery.SchemaField("project_name", "STRING", mode="REQUIRED"),
+#                    bigquery.SchemaField("cloud_project_id", "STRING", mode="REQUIRED"),
+#                    bigquery.SchemaField("merchant_center_id", "STRING", mode="REQUIRED"),
+#                    bigquery.SchemaField("country_code", "STRING", mode="REQUIRED"),
+#                    bigquery.SchemaField("category", "STRING", mode="NULLABLE"),
+#                    bigquery.SchemaField("is_top_category", "BOOLEAN", mode="NULLABLE"),
+#                    bigquery.SchemaField("products_in_stock", "INTEGER", mode="NULLABLE"),
+#                    bigquery.SchemaField("total_products", "INTEGER", mode="NULLABLE"),
+#                    bigquery.SchemaField("share_percentage", "FLOAT", mode="NULLABLE")
+#
+#                ]
+#                
+#                table = bigquery.Table(table_ref, schema=schema)
+#                table.time_partitioning = bigquery.TimePartitioning(
+#                    type_=bigquery.TimePartitioningType.DAY,
+#                    field="merchant_center_date"
+#                )
+#                table = bigquery_client.create_table(table)
+#                print(f"Created table {table.project}.{table.dataset_id}.{table.table_id}")
+#                
+#        except Exception as table_error:
+#            print(f"Error creating/checking BigQuery table: {str(table_error)}")
+#            backfill_results["errors"].append(f"Table creation error: {str(table_error)}")
+#            # Continue processing even if table creation fails
+#        
+#        # Process each project
+#        for project_doc in projects:
+#            project_data = project_doc.to_dict()
+#            project_id = project_doc.id
+#            cloud_project_id = project_data.get('cloudProjectId')
+#            merchant_centers = project_data.get('merchantCenters', [])
+#            
+#            # Skip if no cloud project ID or merchant centers
+#            if not cloud_project_id or not merchant_centers:
+#                continue
+#                
+#            # Process each merchant center
+#            for merchant_center in merchant_centers:
+#                merchant_center_id = merchant_center.get('merchantCenterId')
+#                country_code = merchant_center.get('code')
+#                
+#                if not merchant_center_id or not country_code:
+#                    continue
+#                
+#                backfill_results["merchant_centers_processed"] += 1
+#                mc_dates_processed = 0
+#                
+#                # Process each historical date
+#                for bestseller_date in available_dates:
+#                    try:
+#                        # Use current products feed with historical bestseller data
+#                        query = f"""
+#                        WITH products AS (
+#                          SELECT DISTINCT
+#                            offer_id,
+#                            product_id
+#                          FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
+#                          WHERE _PARTITIONTIME = (SELECT MAX(_PARTITIONTIME) FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`)
+#                          AND availability = 'in stock'
+#                          AND channel = 'online'
+#                        ),
+#
+#                        bestseller_main AS (
+#                          SELECT DISTINCT
+#                            category,
+#                            entity_id
+#                          FROM `{master_project_id}.ds_master_transformed_data.bestseller_monthly`
+#                          WHERE country_code = '{country_code}'
+#                          AND date_month = '{bestseller_date}'
+#                        ),
+#                        
+#                        total_bestseller_counts AS (
+#                          SELECT
+#                            category,
+#                            COUNT(DISTINCT entity_id) AS total_products
+#                          FROM `{master_project_id}.ds_master_transformed_data.bestseller_monthly`
+#                          WHERE country_code = '{country_code}'
+#                          AND date_month = '{bestseller_date}'
+#                          AND category IS NOT NULL
+#                          GROUP BY category
+#                        ),
+#
+#                        mapping AS (
+#                          SELECT DISTINCT
+#                            m.entity_id,
+#                            m.product_id,
+#                            bm.category
+#                          FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}` AS m
+#                          LEFT JOIN bestseller_main AS bm
+#                          ON bm.entity_id = m.entity_id
+#                        ),
+#
+#                        final AS (
+#                          SELECT
+#                            m.entity_id,
+#                            m.category,
+#                            p.* 
+#                          FROM products AS p
+#                          LEFT JOIN mapping AS m
+#                          ON p.product_id = m.product_id
+#                        ),
+#                        
+#                        category_counts AS (
+#                          SELECT
+#                            c.category AS level_1,
+#                            COUNT(DISTINCT c.entity_id) AS products_in_stock,
+#                            t.total_products,
+#                            SAFE_DIVIDE(COUNT(DISTINCT c.entity_id), t.total_products) AS share_of_total
+#                          FROM final c
+#                          JOIN total_bestseller_counts t
+#                          ON c.category = t.category
+#                          WHERE c.category IS NOT NULL
+#                          GROUP BY c.category, t.total_products
+#                          ORDER BY products_in_stock DESC
+#                        )
+#                        
+#                        SELECT 
+#                            c.level_1,
+#                            c.products_in_stock,
+#                            c.total_products,
+#                            c.share_of_total
+#                        FROM category_counts AS c
+#                        WHERE c.products_in_stock > 0
+#                        ORDER BY c.products_in_stock DESC
+#                        """
+#                        
+#                        # Execute the query
+#                        query_job = bigquery_client.query(query)
+#                        results_rows = list(query_job.result())
+#                        
+#                        # If there are categories with products in stock
+#                        if results_rows:
+#                            # Find top category
+#                            top_category = results_rows[0].level_1
+#                            
+#                            # Process all categories for this date
+#                            for row in results_rows:
+#                                category = row.level_1
+#                                products_count = row.products_in_stock
+#                                total_products = row.total_products
+#                                share_of_total = row.share_of_total
+#                                share_percentage = round(share_of_total * 100, 2) if share_of_total else 0
+#                                
+#                                # Prepare data for BigQuery insert for this category
+#                                bq_row = {
+#                                    "timestamp": analysis_timestamp.strftime('%Y-%m-%d %H:%M:%S'),
+#                                    "merchant_center_date": analysis_timestamp.strftime('%Y-%m-%d'),
+#                                    "project_id": project_id,
+#                                    "project_name": project_data.get('name', 'Unknown'),
+#                                    "cloud_project_id": cloud_project_id,
+#                                    "merchant_center_id": merchant_center_id,
+#                                    "country_code": country_code,
+#                                    "category": category,
+#                                    "is_top_category": (category == top_category),
+#                                    "products_in_stock": products_count,
+#                                    "total_products": total_products,
+#                                    "share_percentage": share_percentage,
+#                                    "bestseller_date": bestseller_date
+#                                }
+#                                log_rows_to_insert.append(bq_row)
+#                                
+#                            mc_dates_processed += 1
+#                        
+#                    except Exception as date_error:
+#                        error_msg = f"Error processing date {bestseller_date} for merchant center {merchant_center_id}: {str(date_error)}"
+#                        print(error_msg)
+#                        backfill_results["errors"].append(error_msg)
+#                        continue
+#                
+#                backfill_results["dates_processed"] += mc_dates_processed
+#            
+#            backfill_results["projects_processed"] += 1
+#            
+#        # Insert data into BigQuery in batches to avoid exceeding limits
+#        if log_rows_to_insert:
+#            try:
+#                table_id = f"{master_project_id}.web_app_logs.category_assortment_analysis"
+#                
+#                # Process in batches of 1000 rows
+#                batch_size = 1000
+#                for i in range(0, len(log_rows_to_insert), batch_size):
+#                    batch = log_rows_to_insert[i:i + batch_size]
+#                    errors = bigquery_client.insert_rows_json(table_id, batch)
+#                    if errors:
+#                        error_msg = f"Errors inserting batch {i//batch_size}: {errors}"
+#                        print(error_msg)
+#                        backfill_results["errors"].append(error_msg)
+#                    else:
+#                        print(f"Successfully inserted batch {i//batch_size} ({len(batch)} rows)")
+#                        
+#                backfill_results["total_rows_inserted"] = len(log_rows_to_insert)
+#                
+#            except Exception as insert_error:
+#                error_msg = f"Error inserting data into BigQuery: {str(insert_error)}"
+#                print(error_msg)
+#                backfill_results["errors"].append(error_msg)
+#        
+#        # Return the backfill results
+#        return jsonify({
+#            "success": True,
+#            "timestamp": analysis_timestamp.isoformat(),
+#            "backfill_results": backfill_results
+#        })
+#        
+#    except Exception as e:
+#        print(f"Error during backfill operation: {str(e)}")
+#        return jsonify({
+#            "success": False,
+#            "error": f"Failed during backfill operation: {str(e)}"
+#        }), 500
+    
+@app.route("/api/data/category-trend", methods=["GET"])
+@token_required
+def get_category_trend(current_user):
+    try:
+        
+        # Define the query to get top categories trend
+        query = """
+        SELECT 
+            bestseller_date,
+            AVG(share_percentage) as avg_share_percentage
+        FROM `s360-demand-sensing.web_app_logs.category_assortment_analysis`
+        WHERE is_top_category = true
+        GROUP BY 1
+        ORDER BY 1
+        """
+        
+        # Run the query
+        query_job = bigquery_client.query(query)
+        results = query_job.result()
+        
+        # Convert results to a list of dictionaries
+        trend_data = []
+        for row in results:
+            trend_data.append({
+                "date": row.bestseller_date.strftime('%Y-%m-%d') if row.bestseller_date else None,
+                "avgSharePercentage": row.avg_share_percentage
+            })
+        
+        return jsonify({
+            "success": True,
+            "data": trend_data
+        })
+    
+    except Exception as e:
+        print(f"Error fetching category trend data: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": "Failed to fetch category trend data"
+        }), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=True)
