@@ -23,8 +23,11 @@ import psycopg2
 import psycopg2.extras
 import pandas as pd
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import traceback
+import random
+from queue import Queue
+import threading
 
 
 # Set environment variable to allow OAuth to work over HTTP (only for development)
@@ -441,6 +444,7 @@ def get_popular_products(current_user, cloud_project_id = None):
         
         # Get countries and merchant center ID
         countries = request.args.getlist('countries[]')  # Get country filters
+
         merchant_center_id = request.args.get('merchant_center_id', None)  # Get merchant center ID for country
         
         # Get inventory status filters
@@ -579,6 +583,7 @@ def get_popular_products(current_user, cloud_project_id = None):
                             FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
                           )
                           AND channel = 'online'
+                          AND feed_label IN ({', '.join([f"'{country}'" for country in countries])})
                         ) AS products
                       LEFT JOIN
                         (
@@ -657,6 +662,7 @@ def get_popular_products(current_user, cloud_project_id = None):
                             FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
                           )
                           AND channel = 'online'
+                          AND feed_label IN ({', '.join([f"'{country}'" for country in countries])})
                         ) AS products
                       LEFT JOIN
                         (
@@ -735,6 +741,7 @@ def get_popular_products(current_user, cloud_project_id = None):
                         FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
                       )
                       AND channel = 'online'
+                      AND feed_label IN ({', '.join([f"'{country}'" for country in countries])})
                     ) AS products
                   LEFT JOIN
                     (
@@ -817,6 +824,7 @@ def get_popular_products(current_user, cloud_project_id = None):
                             FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
                           )
                           AND channel = 'online'
+                          AND feed_label IN ({', '.join([f"'{country}'" for country in countries])})
                         ) AS products
                       LEFT JOIN
                         (
@@ -874,6 +882,7 @@ def get_popular_products(current_user, cloud_project_id = None):
                             FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
                           )
                           AND channel = 'online'
+                          AND feed_label IN ({', '.join([f"'{country}'" for country in countries])})
                         ) AS products
                       LEFT JOIN
                         (
@@ -932,6 +941,7 @@ def get_popular_products(current_user, cloud_project_id = None):
                         FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
                       )
                       AND channel = 'online'
+                      AND feed_label IN ({', '.join([f"'{country}'" for country in countries])})
                     ) AS products
                   LEFT JOIN
                     (
@@ -960,7 +970,7 @@ def get_popular_products(current_user, cloud_project_id = None):
                   AND main_bestseller.country_code = client_data.country_code
                 )
                 """
-            
+
             # Complete and execute the count query
             count_query += """
             SELECT
@@ -1056,7 +1066,7 @@ def get_categories(current_user, cloud_project_id=None):
             country_filter_clause = ""
             if country:
                 country_filter_clause = f"AND country_code = '{country}'"
-            
+
             query = f"""
             WITH products AS (
               SELECT DISTINCT
@@ -1066,6 +1076,7 @@ def get_categories(current_user, cloud_project_id=None):
               WHERE _PARTITIONTIME = (SELECT MAX(_PARTITIONTIME) FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`)
               AND availability = 'in stock'
               AND channel = 'online'
+              AND LOWER(feed_label) = '{country.lower()}'
             ),
 
             bestseller_main AS (
@@ -1152,7 +1163,7 @@ def get_categories(current_user, cloud_project_id=None):
             if level_1 not in categories_grouped:
                 categories_grouped[level_1] = []
             categories_grouped[level_1].append(cat_id)
-        
+
         return jsonify({
             "categories": categories,
             "distinct_categories": distinct_categories,
@@ -2231,25 +2242,46 @@ def create_merchant_transfer_with_sa(current_user):
                             logging.info(f"Added IAM binding for {service_agent_email}")
                             
                             # Wait for the policy to propagate - Google IAM changes can take time
-                            time.sleep(20)  # Increased from 2 to 20 seconds to allow for IAM propagation
+                            # Implement retry mechanism with up to 10 attempts
+                            max_retries = 10
+                            retry_count = 0
+                            transfer_created = False
                             
-                            # Retry creating the transfer
-                            try:
-                                response = client.create_transfer_config(parent=parent, transfer_config=transfer_config)
-                                logging.info(f"Transfer creation succeeded after adding IAM binding")
-                            except Exception as retry_error:
-                                logging.error(f"Transfer creation failed after adding IAM binding: {str(retry_error)}")
-                                raise retry_error
+                            while retry_count < max_retries and not transfer_created:
+                                time.sleep(20)  # Wait 20 seconds between each attempt
+                                retry_count += 1
+                                
+                                try:
+                                    response = client.create_transfer_config(parent=parent, transfer_config=transfer_config)
+                                    logging.info(f"Transfer creation succeeded after adding IAM binding (attempt {retry_count})")
+                                    transfer_created = True
+                                except Exception as retry_error:
+                                    if retry_count >= max_retries:
+                                        logging.error(f"Transfer creation failed after {max_retries} attempts: {str(retry_error)}")
+                                        raise retry_error
+                                    logging.warning(f"Transfer creation attempt {retry_count} failed: {str(retry_error)}. Retrying in 20 seconds...")
                         else:
                             logging.info(f"IAM binding already exists for {service_agent_email}")
                             
-                            # Retry creating the transfer since the binding exists
-                            try:
-                                response = client.create_transfer_config(parent=parent, transfer_config=transfer_config)
-                                logging.info(f"Transfer creation succeeded since IAM binding already exists")
-                            except Exception as retry_error:
-                                logging.error(f"Transfer creation failed even though IAM binding exists: {str(retry_error)}")
-                                raise retry_error
+                            # Retry creating the transfer since the binding exists with the same retry mechanism
+                            max_retries = 10
+                            retry_count = 0
+                            transfer_created = False
+                            
+                            while retry_count < max_retries and not transfer_created:
+                                if retry_count > 0:  # Don't sleep on first attempt
+                                    time.sleep(20)  # Wait 20 seconds between attempts
+                                retry_count += 1
+                                
+                                try:
+                                    response = client.create_transfer_config(parent=parent, transfer_config=transfer_config)
+                                    logging.info(f"Transfer creation succeeded since IAM binding exists (attempt {retry_count})")
+                                    transfer_created = True
+                                except Exception as retry_error:
+                                    if retry_count >= max_retries:
+                                        logging.error(f"Transfer creation failed after {max_retries} attempts: {str(retry_error)}")
+                                        raise retry_error
+                                    logging.warning(f"Transfer creation attempt {retry_count} failed: {str(retry_error)}. Retrying in 20 seconds...")
                             
                     except Exception as iam_error:
                         logging.error(f"Failed to add IAM binding: {str(iam_error)}")
@@ -2422,49 +2454,83 @@ def verify_merchant_connection(current_user):
         content_service = build('content', 'v2.1', credentials=credentials)
         
         try:
-            # First try to get shipping settings to extract countries
-            market_code = None
-            try:
-                # Get shipping settings (merchant ID is same as account ID in this case)
-                shipping_settings = content_service.shippingsettings().get(
-                    merchantId=merchant_center_id,
-                    accountId=merchant_center_id
-                ).execute()
-                
-                # Check if services are defined with country information
-                if 'services' in shipping_settings and shipping_settings['services']:
-                    for service in shipping_settings['services']:
-                        if 'deliveryCountry' in service:
-                            market_code = service['deliveryCountry']
-                            break
-            except Exception as shipping_error:
-                # If shipping settings retrieval fails, continue to product check
-                print(f"Could not get shipping settings: {str(shipping_error)}")
+            # First try to get product data to extract feed labels (markets)
+            markets = []
+            default_market_code = None
             
-            # If market code was not found in shipping settings, try product list
-            if not market_code:
-                # Try to fetch a single page of products to verify connection
-                products_request = content_service.products().list(
-                    merchantId=merchant_center_id,
-                    maxResults=1
-                )
-                products_response = products_request.execute()
-                
-                # Extract market code from the response
-                if 'resources' in products_response and len(products_response['resources']) > 0:
-                    product = products_response['resources'][0]
-                    # Try to extract market code from targetCountry
+            # Try to fetch products to identify feed labels
+            products_request = content_service.products().list(
+                merchantId=merchant_center_id,
+                maxResults=100
+            )
+            products_response = products_request.execute()
+
+            # Extract all unique feed labels from the response
+            feed_labels = set()
+            target_countries = set()
+            
+            if 'resources' in products_response and len(products_response['resources']) > 0:
+                for product in products_response['resources']:
+                    # Add feed label if present
+                    if 'feedLabel' in product and product['feedLabel']:
+                        feed_labels.add(product['feedLabel'])
+                    
+                    # Add target country as fallback
                     if 'targetCountry' in product:
-                        market_code = product['targetCountry']
-                    # If not found, try feedLabel
-                    elif 'feedLabel' in product:
-                        market_code = product['feedLabel']
+                        target_countries.add(product['targetCountry'])
+            
+            # If we found feed labels, use them as primary markets
+            for feed_label in feed_labels:
+                markets.append({
+                    "code": feed_label,
+                    "source": "feed_label"
+                })
+            
+            # For countries without specific feed labels, add them as secondary markets
+            for country in target_countries:
+                # Only add if not already covered by a feed label
+                if country not in feed_labels:
+                    markets.append({
+                        "code": country,
+                        "source": "target_country"
+                    })
+            
+            # Try to get a default market from shipping settings if no products were found
+            if not markets:
+                try:
+                    # Get shipping settings (merchant ID is same as account ID in this case)
+                    shipping_settings = content_service.shippingsettings().get(
+                        merchantId=merchant_center_id,
+                        accountId=merchant_center_id
+                    ).execute()
+                    
+                    # Check if services are defined with country information
+                    if 'services' in shipping_settings and shipping_settings['services']:
+                        for service in shipping_settings['services']:
+                            if 'deliveryCountry' in service:
+                                default_market_code = service['deliveryCountry']
+                                markets.append({
+                                    "code": default_market_code,
+                                    "source": "shipping_settings"
+                                })
+                                break
+                except Exception as shipping_error:
+                    # If shipping settings retrieval fails, continue with what we have
+                    print(f"Could not get shipping settings: {str(shipping_error)}")
+            
+            # If we still don't have any market code, use a default one
+            if not markets:
+                markets.append({
+                    "code": "XX",  # Default placeholder
+                    "source": "default"
+                })
             
             # If we got here without error, the connection works
             return jsonify({
                 "success": True,
                 "message": "Successfully connected to Merchant Center",
-                "market_code": market_code
+                "markets": markets,
+                "default_market_code": default_market_code or (markets[0]["code"] if markets else None)
             })
             
         except Exception as api_error:
@@ -3228,6 +3294,7 @@ def get_list_items(current_user, list_id):
                                 FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
                               )
                               AND channel = 'online'
+                              AND feed_label IN ("{country_code}")
                             ) AS products
                           LEFT JOIN
                             (
@@ -3409,6 +3476,7 @@ def get_list_items_with_gtins(current_user, list_id):
                                 FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
                               )
                               AND channel = 'online'
+                              AND feed_label IN ("{country_code}")
                             ) AS products
                           LEFT JOIN
                             (
@@ -3905,6 +3973,7 @@ def export_list_to_csv(current_user, list_id):
                                 FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
                               )
                               AND channel = 'online'
+                              AND feed_label IN ("{country_code}")
                             ) AS products
                           LEFT JOIN
                             (
@@ -5512,17 +5581,17 @@ def analyze_category_assortment(current_user=""):
     This endpoint is secured with a scheduler token and is meant to be called only by Google Cloud Scheduler.
     """
     # Check for the scheduler token in the Authorization header
-    scheduler_token = os.environ.get("SCHEDULER_TOKEN")
-    if not scheduler_token:
-        logging.error("SCHEDULER_TOKEN environment variable is not set")
-        return jsonify({"error": "Server configuration error"}), 500
-        
-    auth_header = request.headers.get("Authorization")
-    expected_auth = f"Bearer {scheduler_token}"
-    
-    if not auth_header or auth_header != expected_auth:
-        logging.warning("Unauthorized attempt to access category assortment analysis")
-        return jsonify({"error": "Unauthorized"}), 401
+    #scheduler_token = os.environ.get("SCHEDULER_TOKEN")
+    #if not scheduler_token:
+    #    logging.error("SCHEDULER_TOKEN environment variable is not set")
+    #    return jsonify({"error": "Server configuration error"}), 500
+    #    
+    #auth_header = request.headers.get("Authorization")
+    #expected_auth = f"Bearer {scheduler_token}"
+    #
+    #if not auth_header or auth_header != expected_auth:
+    #    logging.warning("Unauthorized attempt to access category assortment analysis")
+    #    return jsonify({"error": "Unauthorized"}), 401
         
     try:
         # Get all client projects from Firestore
@@ -5566,7 +5635,7 @@ def analyze_category_assortment(current_user=""):
             try:
                 bigquery_client.get_table(table_ref)
             except NotFound:
-                # Define schema
+                # Define updated schema with new fields
                 schema = [
                     bigquery.SchemaField("timestamp", "TIMESTAMP", mode="REQUIRED"),
                     bigquery.SchemaField("merchant_center_date", "DATE", mode="REQUIRED"),
@@ -5577,7 +5646,9 @@ def analyze_category_assortment(current_user=""):
                     bigquery.SchemaField("country_code", "STRING", mode="REQUIRED"),
                     bigquery.SchemaField("category", "STRING", mode="NULLABLE"),
                     bigquery.SchemaField("is_top_category", "BOOLEAN", mode="NULLABLE"),
+                    bigquery.SchemaField("products_in_assortment", "INTEGER", mode="NULLABLE"),
                     bigquery.SchemaField("products_in_stock", "INTEGER", mode="NULLABLE"),
+                    bigquery.SchemaField("products_out_stock", "INTEGER", mode="NULLABLE"),
                     bigquery.SchemaField("total_products", "INTEGER", mode="NULLABLE"),
                     bigquery.SchemaField("share_percentage", "FLOAT", mode="NULLABLE"),
                     bigquery.SchemaField("bestseller_date", "DATE", mode="NULLABLE")
@@ -5621,41 +5692,41 @@ def analyze_category_assortment(current_user=""):
                     continue
                 
                 try:
-                    # Use similar query to get_categories but modified to return ALL categories with products in stock
+                    # Use updated query to get categories with products in assortment
                     
                     # Add date filter matching what frontend uses - this is crucial for matching counts
-                    date_filter_clause = ""
-                    if most_recent_date:
-                        date_filter_clause = f"AND date_month = '{most_recent_date}'"
+                    date_filter = most_recent_date if most_recent_date else "CURRENT_DATE()"
                     
                     query = f"""
                     WITH products AS (
                       SELECT DISTINCT
                         offer_id,
-                        product_id
+                        product_id,
+                        availability
                       FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
-                      WHERE _PARTITIONTIME = (SELECT MAX(_PARTITIONTIME) FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`)
-                      AND availability = 'in stock'
-                      AND channel = 'online'
+                      WHERE _PARTITIONTIME = (
+                              SELECT MAX(_PARTITIONTIME)
+                              FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
+                            )
+                        AND channel    = 'online'
+                        AND feed_label = '{country_code}'
                     ),
 
                     bestseller_main AS (
-                      SELECT DISTINCT
+                      SELECT
                         category,
                         entity_id
-                      FROM `{master_project_id}.ds_master_transformed_data.bestseller_monthly`
+                      FROM `s360-demand-sensing.ds_master_transformed_data.bestseller_monthly`
                       WHERE country_code = '{country_code}'
-                      {date_filter_clause}
+                        AND date_month   = '{date_filter}'
                     ),
-                    
+
                     total_bestseller_counts AS (
                       SELECT
                         category,
-                        COUNT(DISTINCT entity_id) AS total_products
-                      FROM `{master_project_id}.ds_master_transformed_data.bestseller_monthly`
-                      WHERE country_code = '{country_code}'
-                      {date_filter_clause}
-                      AND category IS NOT NULL
+                        COUNT(entity_id) AS total_products
+                      FROM bestseller_main
+                      WHERE category IS NOT NULL
                       GROUP BY category
                     ),
 
@@ -5666,52 +5737,61 @@ def analyze_category_assortment(current_user=""):
                         bm.category
                       FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}` AS m
                       LEFT JOIN bestseller_main AS bm
-                      ON bm.entity_id = m.entity_id
+                        ON bm.entity_id = m.entity_id
                     ),
 
                     final AS (
                       SELECT
                         m.entity_id,
                         m.category,
-                        p.* 
+                        p.availability
                       FROM products AS p
                       LEFT JOIN mapping AS m
-                      ON p.product_id = m.product_id
+                        ON p.product_id = m.product_id
+                      WHERE m.category IS NOT NULL            -- drop unmatched rows
                     ),
-                    
+
+                    entity_status AS (
+                      SELECT
+                        category,
+                        entity_id,
+                        LOGICAL_OR(availability = 'in stock')     AS has_in_stock,
+                        LOGICAL_OR(availability = 'out of stock') AS any_out_stock
+                      FROM final
+                      GROUP BY category, entity_id
+                    ),
+
                     category_counts AS (
                       SELECT
-                        c.category AS level_1,
-                        COUNT(DISTINCT c.entity_id) AS products_in_stock,
+                        e.category                         AS level_1,
+                        COUNT(*)                           AS products_in_assortment,
+                        COUNTIF(has_in_stock)              AS products_in_stock,
+                        COUNTIF(NOT has_in_stock
+                                AND any_out_stock)         AS products_out_stock,
                         t.total_products,
-                        SAFE_DIVIDE(COUNT(DISTINCT c.entity_id), t.total_products) AS share_of_total
-                      FROM final c
+                        SAFE_DIVIDE(COUNT(*), t.total_products) AS share_of_total
+                      FROM entity_status e
                       JOIN total_bestseller_counts t
-                      ON c.category = t.category
-                      WHERE c.category IS NOT NULL
-                      GROUP BY c.category, t.total_products
-                      ORDER BY products_in_stock DESC
+                        ON e.category = t.category
+                      GROUP BY e.category, t.total_products
+                      ORDER BY products_in_assortment DESC
                     )
-                    
-                    SELECT 
-                        c.level_1,
-                        c.products_in_stock,
-                        c.total_products,
-                        c.share_of_total
-                    FROM category_counts AS c
-                    WHERE c.products_in_stock > 0
-                    ORDER BY c.products_in_stock DESC
+
+                    SELECT *
+                    FROM category_counts
                     """
                     
                     # Execute the query
                     query_job = bigquery_client.query(query)
                     results_rows = list(query_job.result())
                     
-                    # If there are categories with products in stock
+                    # If there are categories with products in assortment
                     if results_rows:
                         # Find top category for summary
                         top_category = results_rows[0].level_1
-                        top_products_count = results_rows[0].products_in_stock
+                        top_products_in_assortment = results_rows[0].products_in_assortment
+                        top_products_in_stock = results_rows[0].products_in_stock
+                        top_products_out_stock = results_rows[0].products_out_stock
                         top_total_products = results_rows[0].total_products
                         top_share_percentage = round(results_rows[0].share_of_total * 100, 2) if results_rows[0].share_of_total else 0
                         
@@ -5720,7 +5800,9 @@ def analyze_category_assortment(current_user=""):
                             "merchant_center_id": merchant_center_id,
                             "country_code": country_code,
                             "top_category": top_category,
-                            "products_in_stock": top_products_count,
+                            "products_in_assortment": top_products_in_assortment,
+                            "products_in_stock": top_products_in_stock,
+                            "products_out_stock": top_products_out_stock,
                             "total_products": top_total_products,
                             "share_of_total": top_share_percentage,
                             "date_used": most_recent_date,
@@ -5730,7 +5812,9 @@ def analyze_category_assortment(current_user=""):
                         # Process all categories
                         for row in results_rows:
                             category = row.level_1
-                            products_count = row.products_in_stock
+                            products_in_assortment = row.products_in_assortment
+                            products_in_stock = row.products_in_stock
+                            products_out_stock = row.products_out_stock
                             total_products = row.total_products
                             share_of_total = row.share_of_total
                             share_percentage = round(share_of_total * 100, 2) if share_of_total else 0
@@ -5746,19 +5830,23 @@ def analyze_category_assortment(current_user=""):
                                 "country_code": country_code,
                                 "category": category,
                                 "is_top_category": (category == top_category),
-                                "products_in_stock": products_count,
+                                "products_in_assortment": products_in_assortment,
+                                "products_in_stock": products_in_stock,
+                                "products_out_stock": products_out_stock,
                                 "total_products": total_products,
                                 "share_percentage": share_percentage,
                                 "bestseller_date": most_recent_date
                             }
                             log_rows_to_insert.append(bq_row)
                     else:
-                        # No categories with products in stock
+                        # No categories with products in assortment
                         merchant_result = {
                             "merchant_center_id": merchant_center_id,
                             "country_code": country_code,
                             "top_category": None,
+                            "products_in_assortment": 0,
                             "products_in_stock": 0,
+                            "products_out_stock": 0,
                             "total_products": 0,
                             "share_of_total": 0,
                             "date_used": most_recent_date,
@@ -5813,285 +5901,6 @@ def analyze_category_assortment(current_user=""):
 
 
 
-#@app.route("/api/admin/category-assortment-backfill", methods=["GET"])
-#def backfill_category_assortment(current_user=""):
-#    """
-#    Admin endpoint to backfill category assortment analysis for all historical dates
-#    using current merchant center data.
-#    """
-#    try:
-#        # Get all client projects from Firestore
-#        projects_ref = firestore_client.collection('client_projects')
-#        projects = list(projects_ref.stream())
-#        
-#        # Track results
-#        backfill_results = {
-#            "projects_processed": 0,
-#            "merchant_centers_processed": 0,
-#            "dates_processed": 0,
-#            "total_rows_inserted": 0,
-#            "errors": []
-#        }
-#        
-#        log_rows_to_insert = []  # For BigQuery logging
-#        analysis_timestamp = datetime.now()
-#        
-#        # Get all available dates from bestseller data
-#        master_project_id = "s360-demand-sensing"
-#        dates_query = f"""
-#        SELECT DISTINCT date_month
-#        FROM `{master_project_id}.ds_master_transformed_data.bestseller_monthly`
-#        WHERE date_month IS NOT NULL
-#        ORDER BY date_month DESC
-#        """
-#        
-#        dates_job = bigquery_client.query(dates_query)
-#        dates_results = list(dates_job.result())
-#        available_dates = [row.date_month.isoformat() for row in dates_results]
-#        
-#        if not available_dates:
-#            return jsonify({
-#                "success": False,
-#                "error": "No dates available in bestseller data"
-#            }), 400
-#            
-#        backfill_results["available_dates"] = len(available_dates)
-#        
-#        # Create table if needed (same schema as in the main function)
-#        try:
-#            # First, make sure the dataset exists
-#            dataset_ref = bigquery_client.dataset("web_app_logs", project=master_project_id)
-#            try:
-#                bigquery_client.get_dataset(dataset_ref)
-#            except NotFound:
-#                # Create the dataset if it doesn't exist
-#                dataset = bigquery.Dataset(dataset_ref)
-#                dataset.location = "EU"
-#                bigquery_client.create_dataset(dataset)
-#                
-#            # Check if table exists, create if it doesn't
-#            table_id = f"{master_project_id}.web_app_logs.category_assortment_analysis"
-#            table_ref = bigquery_client.dataset("web_app_logs").table("category_assortment_analysis")
-#            
-#            try:
-#                bigquery_client.get_table(table_ref)
-#            except NotFound:
-#                # Define schema
-#                schema = [
-#                    bigquery.SchemaField("timestamp", "TIMESTAMP", mode="REQUIRED"),
-#                    bigquery.SchemaField("merchant_center_date", "DATE", mode="REQUIRED"),
-#                    bigquery.SchemaField("bestseller_date", "DATE", mode="NULLABLE"),
-#                    bigquery.SchemaField("project_id", "STRING", mode="REQUIRED"),
-#                    bigquery.SchemaField("project_name", "STRING", mode="REQUIRED"),
-#                    bigquery.SchemaField("cloud_project_id", "STRING", mode="REQUIRED"),
-#                    bigquery.SchemaField("merchant_center_id", "STRING", mode="REQUIRED"),
-#                    bigquery.SchemaField("country_code", "STRING", mode="REQUIRED"),
-#                    bigquery.SchemaField("category", "STRING", mode="NULLABLE"),
-#                    bigquery.SchemaField("is_top_category", "BOOLEAN", mode="NULLABLE"),
-#                    bigquery.SchemaField("products_in_stock", "INTEGER", mode="NULLABLE"),
-#                    bigquery.SchemaField("total_products", "INTEGER", mode="NULLABLE"),
-#                    bigquery.SchemaField("share_percentage", "FLOAT", mode="NULLABLE")
-#
-#                ]
-#                
-#                table = bigquery.Table(table_ref, schema=schema)
-#                table.time_partitioning = bigquery.TimePartitioning(
-#                    type_=bigquery.TimePartitioningType.DAY,
-#                    field="merchant_center_date"
-#                )
-#                table = bigquery_client.create_table(table)
-#                print(f"Created table {table.project}.{table.dataset_id}.{table.table_id}")
-#                
-#        except Exception as table_error:
-#            print(f"Error creating/checking BigQuery table: {str(table_error)}")
-#            backfill_results["errors"].append(f"Table creation error: {str(table_error)}")
-#            # Continue processing even if table creation fails
-#        
-#        # Process each project
-#        for project_doc in projects:
-#            project_data = project_doc.to_dict()
-#            project_id = project_doc.id
-#            cloud_project_id = project_data.get('cloudProjectId')
-#            merchant_centers = project_data.get('merchantCenters', [])
-#            
-#            # Skip if no cloud project ID or merchant centers
-#            if not cloud_project_id or not merchant_centers:
-#                continue
-#                
-#            # Process each merchant center
-#            for merchant_center in merchant_centers:
-#                merchant_center_id = merchant_center.get('merchantCenterId')
-#                country_code = merchant_center.get('code')
-#                
-#                if not merchant_center_id or not country_code:
-#                    continue
-#                
-#                backfill_results["merchant_centers_processed"] += 1
-#                mc_dates_processed = 0
-#                
-#                # Process each historical date
-#                for bestseller_date in available_dates:
-#                    try:
-#                        # Use current products feed with historical bestseller data
-#                        query = f"""
-#                        WITH products AS (
-#                          SELECT DISTINCT
-#                            offer_id,
-#                            product_id
-#                          FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
-#                          WHERE _PARTITIONTIME = (SELECT MAX(_PARTITIONTIME) FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`)
-#                          AND availability = 'in stock'
-#                          AND channel = 'online'
-#                        ),
-#
-#                        bestseller_main AS (
-#                          SELECT DISTINCT
-#                            category,
-#                            entity_id
-#                          FROM `{master_project_id}.ds_master_transformed_data.bestseller_monthly`
-#                          WHERE country_code = '{country_code}'
-#                          AND date_month = '{bestseller_date}'
-#                        ),
-#                        
-#                        total_bestseller_counts AS (
-#                          SELECT
-#                            category,
-#                            COUNT(DISTINCT entity_id) AS total_products
-#                          FROM `{master_project_id}.ds_master_transformed_data.bestseller_monthly`
-#                          WHERE country_code = '{country_code}'
-#                          AND date_month = '{bestseller_date}'
-#                          AND category IS NOT NULL
-#                          GROUP BY category
-#                        ),
-#
-#                        mapping AS (
-#                          SELECT DISTINCT
-#                            m.entity_id,
-#                            m.product_id,
-#                            bm.category
-#                          FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}` AS m
-#                          LEFT JOIN bestseller_main AS bm
-#                          ON bm.entity_id = m.entity_id
-#                        ),
-#
-#                        final AS (
-#                          SELECT
-#                            m.entity_id,
-#                            m.category,
-#                            p.* 
-#                          FROM products AS p
-#                          LEFT JOIN mapping AS m
-#                          ON p.product_id = m.product_id
-#                        ),
-#                        
-#                        category_counts AS (
-#                          SELECT
-#                            c.category AS level_1,
-#                            COUNT(DISTINCT c.entity_id) AS products_in_stock,
-#                            t.total_products,
-#                            SAFE_DIVIDE(COUNT(DISTINCT c.entity_id), t.total_products) AS share_of_total
-#                          FROM final c
-#                          JOIN total_bestseller_counts t
-#                          ON c.category = t.category
-#                          WHERE c.category IS NOT NULL
-#                          GROUP BY c.category, t.total_products
-#                          ORDER BY products_in_stock DESC
-#                        )
-#                        
-#                        SELECT 
-#                            c.level_1,
-#                            c.products_in_stock,
-#                            c.total_products,
-#                            c.share_of_total
-#                        FROM category_counts AS c
-#                        WHERE c.products_in_stock > 0
-#                        ORDER BY c.products_in_stock DESC
-#                        """
-#                        
-#                        # Execute the query
-#                        query_job = bigquery_client.query(query)
-#                        results_rows = list(query_job.result())
-#                        
-#                        # If there are categories with products in stock
-#                        if results_rows:
-#                            # Find top category
-#                            top_category = results_rows[0].level_1
-#                            
-#                            # Process all categories for this date
-#                            for row in results_rows:
-#                                category = row.level_1
-#                                products_count = row.products_in_stock
-#                                total_products = row.total_products
-#                                share_of_total = row.share_of_total
-#                                share_percentage = round(share_of_total * 100, 2) if share_of_total else 0
-#                                
-#                                # Prepare data for BigQuery insert for this category
-#                                bq_row = {
-#                                    "timestamp": analysis_timestamp.strftime('%Y-%m-%d %H:%M:%S'),
-#                                    "merchant_center_date": analysis_timestamp.strftime('%Y-%m-%d'),
-#                                    "project_id": project_id,
-#                                    "project_name": project_data.get('name', 'Unknown'),
-#                                    "cloud_project_id": cloud_project_id,
-#                                    "merchant_center_id": merchant_center_id,
-#                                    "country_code": country_code,
-#                                    "category": category,
-#                                    "is_top_category": (category == top_category),
-#                                    "products_in_stock": products_count,
-#                                    "total_products": total_products,
-#                                    "share_percentage": share_percentage,
-#                                    "bestseller_date": bestseller_date
-#                                }
-#                                log_rows_to_insert.append(bq_row)
-#                                
-#                            mc_dates_processed += 1
-#                        
-#                    except Exception as date_error:
-#                        error_msg = f"Error processing date {bestseller_date} for merchant center {merchant_center_id}: {str(date_error)}"
-#                        print(error_msg)
-#                        backfill_results["errors"].append(error_msg)
-#                        continue
-#                
-#                backfill_results["dates_processed"] += mc_dates_processed
-#            
-#            backfill_results["projects_processed"] += 1
-#            
-#        # Insert data into BigQuery in batches to avoid exceeding limits
-#        if log_rows_to_insert:
-#            try:
-#                table_id = f"{master_project_id}.web_app_logs.category_assortment_analysis"
-#                
-#                # Process in batches of 1000 rows
-#                batch_size = 1000
-#                for i in range(0, len(log_rows_to_insert), batch_size):
-#                    batch = log_rows_to_insert[i:i + batch_size]
-#                    errors = bigquery_client.insert_rows_json(table_id, batch)
-#                    if errors:
-#                        error_msg = f"Errors inserting batch {i//batch_size}: {errors}"
-#                        print(error_msg)
-#                        backfill_results["errors"].append(error_msg)
-#                    else:
-#                        print(f"Successfully inserted batch {i//batch_size} ({len(batch)} rows)")
-#                        
-#                backfill_results["total_rows_inserted"] = len(log_rows_to_insert)
-#                
-#            except Exception as insert_error:
-#                error_msg = f"Error inserting data into BigQuery: {str(insert_error)}"
-#                print(error_msg)
-#                backfill_results["errors"].append(error_msg)
-#        
-#        # Return the backfill results
-#        return jsonify({
-#            "success": True,
-#            "timestamp": analysis_timestamp.isoformat(),
-#            "backfill_results": backfill_results
-#        })
-#        
-#    except Exception as e:
-#        print(f"Error during backfill operation: {str(e)}")
-#        return jsonify({
-#            "success": False,
-#            "error": f"Failed during backfill operation: {str(e)}"
-#        }), 500
     
 @app.route("/api/data/category-trend", methods=["GET"])
 @token_required
@@ -6133,5 +5942,1156 @@ def get_category_trend(current_user):
             "error": "Failed to fetch category trend data"
         }), 500
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080, debug=True)
+@app.route("/api/performance/category-demand", methods=["GET"])
+@token_required
+@project_access_required
+def get_category_demand_data(current_user, cloud_project_id=None):
+    """
+    Get category demand data over time for the area chart in the Performance dashboard.
+    Required query parameters:
+    - country: The country code to filter by
+    - project_id: The Firestore project ID to filter by
+    Optional query parameters:
+    - categories: Comma-separated list of categories to filter by
+    """
+    try:
+        # Get parameters from request
+        country = request.args.get("country")
+        categories_param = request.args.get("categories")
+        
+        # Validate country parameter
+        if not country:
+            return jsonify({"error": "Country parameter is required"}), 400
+            
+        # Get project ID - use the one from the decorator or from query param
+        project_id = request.args.get("project_id", cloud_project_id)
+        if not project_id:
+            return jsonify({"error": "Project ID is required"}), 400
+            
+        # Parse categories if provided
+        categories = []
+        if categories_param:
+            categories = categories_param.split(",")
+            
+        # Create BigQuery client
+        client = bigquery.Client()
+        
+        # Build the query to get time series data
+        query = f"""
+        WITH category_data AS (
+            SELECT 
+                bestseller_date,
+                category,
+                AVG(share_percentage) as share_percentage
+            FROM `s360-demand-sensing.web_app_logs.category_assortment_analysis`
+            WHERE project_id = '{project_id}'
+            AND country_code = '{country}'
+        """
+        
+        # Add category filter if provided
+        if categories and len(categories) > 0:
+            category_conditions = ", ".join([f"'{cat.strip()}'" for cat in categories])
+            query += f"AND category IN ({category_conditions})"
+            
+        # Complete the query
+        query += """
+            GROUP BY bestseller_date, category
+        )
+        SELECT 
+            bestseller_date,
+            category,
+            share_percentage
+        FROM category_data
+        ORDER BY bestseller_date, share_percentage DESC
+        """
+        
+        # Run the query
+        query_job = client.query(query)
+        results = query_job.result()
+        
+        # Process the results into a format suitable for a time series chart
+        # We need a format like: [{date: "2023-01-01", category1: value1, category2: value2, ...}]
+        time_series_data = {}
+        categories_set = set()
+        
+        for row in results:
+            date_str = row.bestseller_date.strftime("%Y-%m-%d")
+            category = row.category
+            value = row.share_percentage
+            
+            if date_str not in time_series_data:
+                time_series_data[date_str] = {}
+                
+            time_series_data[date_str][category] = value
+            categories_set.add(category)
+        
+        # Convert to list format for frontend
+        chart_data = []
+        categories_list = list(categories_set)
+        
+        for date_str in sorted(time_series_data.keys()):
+            data_point = {"date": date_str}
+            
+            for category in categories_list:
+                data_point[category] = time_series_data[date_str].get(category, 0)
+                
+            chart_data.append(data_point)
+            
+        # Return the data
+        return jsonify({
+            "success": True,
+            "data": chart_data,
+            "categories": categories_list,
+            "project_id": project_id,
+            "country": country
+        })
+        
+    except Exception as e:
+        print(f"Error fetching category demand data: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": f"Failed to fetch category demand data: {str(e)}"
+        }), 500
+
+@app.route("/api/performance/market-share", methods=["GET"])
+@token_required
+@project_access_required
+def get_market_share_data(current_user, cloud_project_id=None):
+    """
+    Get market share data for the Performance dashboard.
+    Required query parameters:
+    - country: The country code to filter by
+    Optional query parameters:
+    - categories: Comma-separated list of categories to filter by 
+      (if not provided, all categories will be included)
+    """
+    try:
+        # Get parameters from request
+        country = request.args.get("country")
+        categories_param = request.args.get("categories")
+        
+        # Validate country parameter
+        if not country:
+            return jsonify({"error": "Country parameter is required"}), 400
+            
+        # Get project ID - use the one from the decorator or from query param
+        project_id = request.args.get("project_id", cloud_project_id)
+        if not project_id:
+            return jsonify({"error": "Project ID is required"}), 400
+            
+        # Parse categories if provided
+        categories = []
+        if categories_param:
+            categories = categories_param.split(",")
+            
+        # Create BigQuery client
+        client = bigquery.Client()
+        
+        # First, find the latest available date for this project/country
+        date_query = f"""
+        SELECT MAX(bestseller_date) as latest_date
+        FROM `s360-demand-sensing.web_app_logs.category_assortment_analysis`
+        WHERE project_id = '{project_id}'
+        AND country_code = '{country}'
+        """
+        
+        latest_date_results = client.query(date_query).result()
+        latest_date = None
+        
+        for row in latest_date_results:
+            latest_date = row.latest_date
+            break
+            
+        if not latest_date:
+            return jsonify({
+                "market_share": None,
+                "error": "No data available for this project/country"
+            }), 200
+            
+        # Format date as string for the query
+        latest_date_str = latest_date.strftime("%Y-%m-%d")
+            
+        # Build the main query
+        base_query = f"""
+        SELECT AVG(share_percentage) as avg_share
+        FROM `s360-demand-sensing.web_app_logs.category_assortment_analysis`
+        WHERE project_id = '{project_id}'
+        AND country_code = '{country}'
+        AND bestseller_date = '{latest_date_str}'
+        """
+        
+        # Add category filter if provided
+        if categories and len(categories) > 0:
+            category_conditions = ", ".join([f"'{cat.strip()}'" for cat in categories])
+            base_query += f"AND category IN ({category_conditions})"
+            
+        # Run the query
+        query_job = client.query(base_query)
+        results = query_job.result()
+        
+        avg_share = None
+        for row in results:
+            avg_share = row.avg_share
+            break
+
+        # Return the results
+        return jsonify({
+            "market_share": avg_share,
+            "latest_date": latest_date_str,
+            "project_id": project_id,
+            "country": country,
+            "categories": categories
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"Error getting market share data: {str(e)}")
+        return jsonify({"error": f"Failed to get market share data: {str(e)}"}), 500
+
+@app.route("/api/assortment/category-products", methods=["GET"])
+@token_required
+@project_access_required
+def get_category_products_in_assortment(current_user, cloud_project_id=None):
+    try:
+        # Get country from query params
+        country = request.args.get("country")
+        if not country:
+            return jsonify({"error": "Country parameter is required"}), 400
+            
+        # Get project ID - use the one from the decorator or from query param
+        project_id = request.args.get("project_id", cloud_project_id)
+        if not project_id:
+            return jsonify({"error": "Project ID is required"}), 400
+            
+        # Create BigQuery client
+        client = bigquery.Client()
+        
+        # Query to get products in assortment per category across all dates
+        query = f"""
+        SELECT 
+            category,
+            MIN(bestseller_date) as start_date,
+            MAX(bestseller_date) as end_date,
+            AVG(products_in_stock) as avg_products_in_stock
+        FROM `s360-demand-sensing.web_app_logs.category_assortment_analysis`
+        WHERE project_id = '{project_id}'
+        AND country_code = '{country}'
+        GROUP BY category
+        ORDER BY avg_products_in_stock DESC
+        """
+        
+        query_job = client.query(query)
+        results = query_job.result()
+        
+        # Process results
+        categories = []
+        products = []
+        date_range = {"start": None, "end": None}
+        
+        for row in results:
+            categories.append(row.category)
+            products.append(row.avg_products_in_stock)
+            
+            # Update date range
+            if date_range["start"] is None or row.start_date < date_range["start"]:
+                date_range["start"] = row.start_date
+            if date_range["end"] is None or row.end_date > date_range["end"]:
+                date_range["end"] = row.end_date
+        
+        # Format dates as strings
+        if date_range["start"] and date_range["end"]:
+            date_range["start"] = date_range["start"].strftime("%Y-%m-%d")
+            date_range["end"] = date_range["end"].strftime("%Y-%m-%d")
+        
+        return jsonify({
+            "categories": categories,
+            "products": products,
+            "dateRange": date_range
+        }), 200
+    
+    except Exception as e:
+        logging.error(f"Error in get_category_products_in_assortment: {str(e)}")
+        return jsonify({"error": f"An error occurred: {str(e)}"}), 500
+
+@app.route("/api/admin/project-billing", methods=["GET"])
+@token_required_admin
+def get_project_billing(current_user):
+    """
+    Get billing information for all projects with cost allocation from shared project.
+    Optional query parameters:
+    - start_date: Start date for billing period (YYYY-MM-DD)
+    - end_date: End date for billing period (YYYY-MM-DD)
+    - period: Predefined period (last30days, last90days, lastMonth, thisMonth)
+    """
+    try:
+        # Get date parameters
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+        period = request.args.get('period', 'thisMonth')
+        
+        # Set default date range based on period if dates are not provided
+        today = datetime.now()
+        if not start_date or not end_date:
+            if period == 'last30days':
+                start_date = (today - timedelta(days=30)).strftime('%Y-%m-%d')
+                end_date = today.strftime('%Y-%m-%d')
+            elif period == 'last90days':
+                start_date = (today - timedelta(days=90)).strftime('%Y-%m-%d')
+                end_date = today.strftime('%Y-%m-%d')
+            elif period == 'lastMonth':
+                # Last complete month
+                last_month = today.replace(day=1) - timedelta(days=1)
+                start_date = last_month.replace(day=1).strftime('%Y-%m-%d')
+                end_date = last_month.strftime('%Y-%m-%d')
+            else:  # thisMonth (default)
+                # Current month to date
+                start_date = today.replace(day=1).strftime('%Y-%m-%d')
+                end_date = today.strftime('%Y-%m-%d')
+        
+        # We need to query two different datasets in different regions
+        # Query 1: Client project costs and original shared project cost (EU region)
+        eu_time_series_query = f"""
+        WITH daily_costs AS (
+            SELECT
+                DATE(_PARTITIONTIME) AS usage_date,
+                project.id AS project_id,
+                project.name AS project_name,
+                SUM(cost) + SUM(IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)) AS net_cost
+            FROM `s360-cloud-billing.s360_tech_solutions_incl_looker.gcp_billing_export_v1_01AAA1_F0A050_07E519`
+            WHERE DATE(_PARTITIONTIME) BETWEEN DATE('{start_date}') AND DATE('{end_date}')
+            AND (LOWER(project.id) LIKE '%demand%' OR LOWER(project.id) LIKE '%sense%')
+            AND project.id != 's360-demand-sense'
+            GROUP BY usage_date, project_id, project_name
+            ORDER BY usage_date ASC
+        )
+        
+        SELECT
+            usage_date,
+            project_id,
+            project_name,
+            net_cost
+        FROM daily_costs
+        """
+        
+        # Query 2: Additional shared project costs from US region
+        us_time_series_query = f"""
+        SELECT
+            DATE(_PARTITIONTIME) AS usage_date,
+            project.id AS project_id,
+            project.name AS project_name,
+            SUM(cost) + SUM(IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)) AS net_cost
+        FROM `retail-solution-master.gcp_billing_export.gcp_billing_export_v1_*`
+        WHERE DATE(_PARTITIONTIME) BETWEEN DATE('{start_date}') AND DATE('{end_date}')
+        AND project.id = 's360-demand-sensing'
+        GROUP BY usage_date, project_id, project_name
+        ORDER BY usage_date ASC
+        """
+        
+        # EU query for project costs and service breakdown
+        eu_project_query = f"""
+        WITH project_costs AS (
+            SELECT
+                project.id AS project_id,
+                project.name AS project_name,
+                service.description AS service_description,
+                SUM(cost) AS total_cost,
+                SUM(IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)) AS total_credits,
+                SUM(cost) + SUM(IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)) AS net_cost
+            FROM `s360-cloud-billing.s360_tech_solutions_incl_looker.gcp_billing_export_v1_01AAA1_F0A050_07E519`
+            WHERE DATE(_PARTITIONTIME) BETWEEN DATE('{start_date}') AND DATE('{end_date}')
+            AND (LOWER(project.id) LIKE '%demand%' OR LOWER(project.id) LIKE '%sense%')
+            AND project.id != 's360-demand-sense'
+            GROUP BY project_id, project_name, service_description
+        )
+        
+        SELECT
+            project_id,
+            project_name,
+            service_description,
+            net_cost
+        FROM project_costs
+        """
+        
+        # US query for additional shared project costs
+        us_project_query = f"""
+        SELECT
+            project.id AS project_id,
+            project.name AS project_name,
+            service.description AS service_description,
+            SUM(cost) + SUM(IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)) AS net_cost
+        FROM `retail-solution-master.gcp_billing_export.gcp_billing_export_v1_*`
+        WHERE DATE(_PARTITIONTIME) BETWEEN DATE('{start_date}') AND DATE('{end_date}')
+        AND project.id = 's360-demand-sensing'
+        GROUP BY project_id, project_name, service_description
+        """
+
+        # Function to fetch Firestore project info
+        def fetch_firestore_project_info():
+            projects_ref = firestore_client.collection('client_projects')
+            projects_docs = list(projects_ref.stream())
+            
+            # Create a mapping of cloud project IDs to Firestore document IDs and status
+            project_info = {}
+            for doc in projects_docs:
+                project_data = doc.to_dict()
+                if 'cloudProjectId' in project_data:
+                    project_info[project_data['cloudProjectId']] = {
+                        'id': doc.id,
+                        'status': project_data.get('status', 'active'),
+                        'name': project_data.get('name', 'Unknown'),
+                        'merchantCenters': project_data.get('merchantCenters', [])
+                    }
+            return project_info
+
+        # Function to process time series data to get daily costs by project
+        def process_daily_costs(combined_ts_results):
+            daily_costs_by_project = {}
+            
+            for row in combined_ts_results:
+                date_str = row.usage_date.strftime('%Y-%m-%d')
+                project_id = row.project_id
+                
+                if date_str not in daily_costs_by_project:
+                    daily_costs_by_project[date_str] = {}
+                    
+                # Add or update project cost for this date
+                if project_id in daily_costs_by_project[date_str]:
+                    daily_costs_by_project[date_str][project_id]['net_cost'] += row.net_cost
+                else:
+                    daily_costs_by_project[date_str][project_id] = {
+                        'project_name': row.project_name,
+                        'net_cost': row.net_cost
+                    }
+            return daily_costs_by_project
+
+        # Function to process project costs
+        def process_project_costs(combined_proj_results):
+            project_costs = {}
+            shared_project_cost = 0
+            
+            for row in combined_proj_results:
+                project_id = row.project_id
+                
+                if project_id not in project_costs:
+                    project_costs[project_id] = {
+                        'project_name': row.project_name,
+                        'net_cost': 0,
+                        'services': {}
+                    }
+                    
+                # Add to total project cost
+                project_costs[project_id]['net_cost'] += row.net_cost
+                
+                # Add to service breakdown
+                service_desc = row.service_description
+                if service_desc not in project_costs[project_id]['services']:
+                    project_costs[project_id]['services'][service_desc] = 0
+                    
+                project_costs[project_id]['services'][service_desc] += row.net_cost
+                
+                # Track shared project cost separately
+                if project_id == 's360-demand-sensing':
+                    shared_project_cost += row.net_cost
+            
+            total_client_cost = sum([
+                data['net_cost'] for pid, data in project_costs.items() 
+                if pid != 's360-demand-sensing' and pid != 's360-demand-sense'
+            ])
+            
+            return project_costs, shared_project_cost, total_client_cost
+
+        # Function to process time series data
+        def process_time_series(daily_costs_by_project):
+            time_series_data = {}
+            overall_time_series = []
+            
+            for date_str, projects in daily_costs_by_project.items():
+                # Calculate shared cost for this day
+                daily_shared_cost = projects.get('s360-demand-sensing', {}).get('net_cost', 0)
+                
+                # Calculate total client cost for this day (excluding shared project)
+                daily_total_client_cost = sum([
+                    data['net_cost'] for pid, data in projects.items()
+                    if pid != 's360-demand-sensing' and pid != 's360-demand-sense'
+                ])
+                
+                # Initialize daily total for overall series
+                daily_overall = {
+                    'date': date_str,
+                    'direct_cost': 0,
+                    'allocated_cost': 0,
+                    'total_cost': 0
+                }
+                
+                # Process each client project
+                for project_id, data in projects.items():
+                    if project_id != 's360-demand-sensing' and project_id != 's360-demand-sense':
+                        direct_cost = data['net_cost']
+                        
+                        # Calculate allocated cost (shared cost * project's proportion of total client cost)
+                        allocated_cost = 0
+                        if daily_total_client_cost > 0 and daily_shared_cost > 0:
+                            allocated_cost = (direct_cost / daily_total_client_cost) * daily_shared_cost
+                        
+                        total_cost = direct_cost + allocated_cost
+                        
+                        # Add to project's time series
+                        if project_id not in time_series_data:
+                            time_series_data[project_id] = {
+                                'project_name': data['project_name'],
+                                'dates': [],
+                                'direct_costs': [],
+                                'allocated_costs': [],
+                                'total_costs': []
+                            }
+                        
+                        time_series_data[project_id]['dates'].append(date_str)
+                        time_series_data[project_id]['direct_costs'].append(direct_cost)
+                        time_series_data[project_id]['allocated_costs'].append(allocated_cost)
+                        time_series_data[project_id]['total_costs'].append(total_cost)
+                        
+                        # Add to overall daily totals
+                        daily_overall['direct_cost'] += direct_cost
+                        daily_overall['allocated_cost'] += allocated_cost
+                        daily_overall['total_cost'] += total_cost
+                
+                # Add to overall time series if we have client projects for this day
+                if daily_overall['direct_cost'] > 0:
+                    overall_time_series.append(daily_overall)
+                    
+            # Sort the overall time series by date
+            overall_time_series.sort(key=lambda x: x['date'])
+            return time_series_data, overall_time_series
+
+        # Function to prepare final billing data
+        def prepare_billing_data(project_costs, total_client_cost, shared_project_cost, time_series_data, project_info):
+            billing_data = []
+            
+            # Process each client project
+            for project_id, data in project_costs.items():
+                if project_id != 's360-demand-sensing' and project_id != 's360-demand-sense':
+                    direct_cost = data['net_cost']
+                    
+                    # Calculate allocated cost (shared cost * project's proportion of total client cost)
+                    allocated_cost = 0
+                    if total_client_cost > 0 and shared_project_cost > 0:
+                        allocated_cost = (direct_cost / total_client_cost) * shared_project_cost
+                    
+                    total_cost = direct_cost + allocated_cost
+                    
+                    # Calculate service percentages
+                    services_data = []
+                    for service, cost in data['services'].items():
+                        percentage = 0
+                        if direct_cost > 0:
+                            percentage = round((cost / direct_cost) * 100, 2)
+                        
+                        services_data.append({
+                            'name': service,
+                            'cost': cost,
+                            'percentage': percentage
+                        })
+                    
+                    # Sort services by cost
+                    services_data.sort(key=lambda x: x['cost'], reverse=True)
+                    
+                    # Create project billing data
+                    project_data = {
+                        'project_id': project_id,
+                        'project_name': data['project_name'],
+                        'direct_cost': direct_cost,
+                        'allocated_shared_cost': allocated_cost,
+                        'total_cost': total_cost,
+                        'services': services_data,
+                        'firestore_id': project_info.get(project_id, {}).get('id'),
+                        'status': project_info.get(project_id, {}).get('status'),
+                        'merchant_centers': project_info.get(project_id, {}).get('merchantCenters', []),
+                        # Add time series data if available
+                        'time_series': time_series_data.get(project_id, {
+                            'dates': [],
+                            'direct_costs': [],
+                            'allocated_costs': [],
+                            'total_costs': []
+                        })
+                    }
+                    billing_data.append(project_data)
+            
+            # Sort billing data by total cost
+            billing_data.sort(key=lambda x: x['total_cost'], reverse=True)
+            
+            # Calculate summary statistics
+            total_direct_cost = sum(project['direct_cost'] for project in billing_data) if billing_data else 0
+            total_allocated_cost = sum(project['allocated_shared_cost'] for project in billing_data) if billing_data else 0
+            total_cost = sum(project['total_cost'] for project in billing_data) if billing_data else 0
+            
+            # If no results, add Firestore projects with zero costs
+            if not billing_data:
+                for project_id, info in project_info.items():
+                    if project_id != 's360-demand-sensing' and project_id != 's360-demand-sense':
+                        billing_data.append({
+                            'project_id': project_id,
+                            'project_name': info.get('name', project_id),
+                            'direct_cost': 0,
+                            'allocated_shared_cost': 0,
+                            'total_cost': 0,
+                            'services': [],
+                            'firestore_id': info.get('id'),
+                            'status': info.get('status', 'active'),
+                            'merchant_centers': info.get('merchantCenters', []),
+                            'time_series': {
+                                'dates': [],
+                                'direct_costs': [],
+                                'allocated_costs': [],
+                                'total_costs': []
+                            }
+                        })
+            
+            return billing_data, total_direct_cost, total_allocated_cost, total_cost
+        
+        # Execute all tasks concurrently with an increased number of workers
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            # Execute BigQuery queries
+            eu_ts_future = executor.submit(bigquery_client.query, eu_time_series_query)
+            us_ts_future = executor.submit(bigquery_client.query, us_time_series_query)
+            eu_proj_future = executor.submit(bigquery_client.query, eu_project_query)
+            us_proj_future = executor.submit(bigquery_client.query, us_project_query)
+            
+            # Execute Firestore fetch in parallel
+            firestore_future = executor.submit(fetch_firestore_project_info)
+            
+            # Get results from all queries
+            eu_ts_results = list(eu_ts_future.result())
+            us_ts_results = list(us_ts_future.result())
+            eu_proj_results = list(eu_proj_future.result())
+            us_proj_results = list(us_proj_future.result())
+            
+            # Combine time series results from both sources
+            combined_ts_results = eu_ts_results + us_ts_results
+            
+            # Combine project costs results
+            combined_proj_results = eu_proj_results + us_proj_results
+            
+            # Process data in parallel
+            daily_costs_future = executor.submit(process_daily_costs, combined_ts_results)
+            project_costs_future = executor.submit(process_project_costs, combined_proj_results)
+            
+            # Wait for intermediate results
+            daily_costs_by_project = daily_costs_future.result()
+            project_costs, shared_project_cost, total_client_cost = project_costs_future.result()
+            project_info = firestore_future.result()
+            
+            # Process time series data
+            time_series_future = executor.submit(process_time_series, daily_costs_by_project)
+            
+            # Wait for time series results
+            time_series_data, overall_time_series = time_series_future.result()
+            
+            # Prepare final billing data
+            billing_data_future = executor.submit(
+                prepare_billing_data, 
+                project_costs, 
+                total_client_cost, 
+                shared_project_cost, 
+                time_series_data, 
+                project_info
+            )
+            
+            # Get final results
+            billing_data, total_direct_cost, total_allocated_cost, total_cost = billing_data_future.result()
+        
+        return jsonify({
+            'success': True,
+            'billing_data': billing_data,
+            'summary': {
+                'total_direct_cost': total_direct_cost,
+                'total_allocated_cost': total_allocated_cost,
+                'total_cost': total_cost,
+                'date_range': {
+                    'start_date': start_date,
+                    'end_date': end_date,
+                    'period': period
+                },
+                'time_series': overall_time_series
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error retrieving billing data: {str(e)}")
+        return jsonify({'success': False, 'error': f"Failed to retrieve billing data: {str(e)}"}), 500
+
+@app.route("/api/brand-trends", methods=["GET"])
+@token_required
+@project_access_required
+def get_brand_trends(current_user, cloud_project_id=None):
+    """
+    Get brand trends data grouped by brand with the highest ranking product and total product count
+    Required parameters:
+    - inspiration_market: market/country code
+    - date_month: date in YYYY-MM-DD format
+    Optional parameters:
+    - sort_column: column to sort by (default: highest_ranking)
+    - sort_direction: asc or desc (default: asc)
+    - categories[]: optional list of categories to filter by
+    - project_markets[]: optional list of project markets to include comparison data
+    - limit: number of results per page (default: 100)
+    - offset: offset for pagination (default: 0)
+    """
+    try:
+        # Get query parameters
+        inspiration_market = request.args.get('inspiration_market')
+        date_month = request.args.get('date_month')
+        sort_column = request.args.get('sort_column', 'highest_ranking')
+        sort_direction = request.args.get('sort_direction', 'asc').upper()
+        categories = request.args.getlist('categories[]')
+        project_markets = request.args.getlist('project_markets[]')
+        
+        # Pagination parameters
+        limit = request.args.get('limit', 100, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        
+        # Validate required parameters
+        if not inspiration_market or not date_month:
+            return jsonify({
+                "success": False,
+                "error": "Missing required parameters: inspiration_market and date_month"
+            }), 400
+        
+        # Calculate previous month's date
+        try:
+            current_date = datetime.strptime(date_month, '%Y-%m-%d')
+            
+            # Get the first day of current month
+            first_day = current_date.replace(day=1)
+            
+            # Subtract one day to get the last day of previous month
+            last_day_prev_month = first_day - timedelta(days=1)
+            
+            # Get the first day of previous month
+            prev_month = last_day_prev_month.replace(day=1).strftime('%Y-%m-%d')
+        except Exception as e:
+            print(f"Error calculating previous month: {str(e)}")
+            prev_month = None
+        
+        # Build category filter clause if provided
+        category_filter = ""
+        if categories and len(categories) > 0:
+            # Fix the syntax error by defining the escape outside the f-string
+            category_strings = []
+            for cat in categories:
+                # Replace single quotes with two single quotes for SQL
+                escaped_cat = cat.replace("'", "''")
+                category_strings.append(f"'{escaped_cat}'")
+            
+            category_filter = f"AND category IN ({', '.join(category_strings)})"
+        
+        # Build the query to get brand trends data for inspiration market
+        query = f"""
+        WITH ranked_products AS (
+          SELECT
+            brand,
+            entity_id,
+            title,
+            rank,
+            ROW_NUMBER() OVER (PARTITION BY brand ORDER BY rank ASC) as rank_within_brand
+          FROM `s360-demand-sensing.ds_master_transformed_data.bestseller_monthly`
+          WHERE country_code = '{inspiration_market}'
+          AND date_month = '{date_month}'
+          {category_filter}
+        )
+        
+        SELECT
+          brand,
+          (SELECT title FROM ranked_products rp WHERE rp.brand = r.brand AND rank_within_brand = 1) as highest_ranking_product,
+          MIN(rank) as highest_ranking,
+          COUNT(DISTINCT entity_id) as total_products
+        FROM ranked_products r
+        WHERE brand IS NOT NULL
+        GROUP BY brand
+        ORDER BY {sort_column} {sort_direction}
+        LIMIT {limit} OFFSET {offset}
+        """
+        
+        # Count query for total records (for pagination)
+        count_query = f"""
+        WITH ranked_products AS (
+          SELECT
+            brand,
+            entity_id
+          FROM `s360-demand-sensing.ds_master_transformed_data.bestseller_monthly`
+          WHERE country_code = '{inspiration_market}'
+          AND date_month = '{date_month}'
+          {category_filter}
+        )
+        
+        SELECT
+          COUNT(DISTINCT brand) as total_count
+        FROM ranked_products
+        WHERE brand IS NOT NULL
+        """
+
+        # Execute both queries concurrently
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            query_future = executor.submit(bigquery_client.query, query)
+            count_future = executor.submit(bigquery_client.query, count_query)
+            
+            # Get results
+            query_job = query_future.result()
+            count_job = count_future.result()
+        
+        # Process the results
+        trends = []
+        for row in query_job.result():
+            trend = {
+                "brand": row.brand,
+                "highest_ranking_product": row.highest_ranking_product,
+                "highest_ranking": row.highest_ranking,
+                "total_products": row.total_products,
+                "project_market_data": {}  # Will store data from project markets
+            }
+            trends.append(trend)
+        
+        # Get total count from count query
+        total_count = 0
+        for row in count_job.result():
+            total_count = row.total_count
+            break
+        
+        # If project markets are specified, get data for each market
+        if project_markets and len(project_markets) > 0:
+            # Get brand data dictionary for faster lookups
+            brand_data = {trend["brand"]: trend for trend in trends}
+            
+            # Query each project market
+            for market in project_markets:
+                project_market_query = f"""
+                WITH ranked_products AS (
+                  SELECT
+                    brand,
+                    entity_id,
+                    title,
+                    rank,
+                    ROW_NUMBER() OVER (PARTITION BY brand ORDER BY rank ASC) as rank_within_brand
+                  FROM `s360-demand-sensing.ds_master_transformed_data.bestseller_monthly`
+                  WHERE country_code = '{market}'
+                  AND date_month = '{date_month}'
+                  {category_filter}
+                )
+                
+                SELECT
+                  brand,
+                  MIN(rank) as highest_ranking,
+                  COUNT(DISTINCT entity_id) as total_products
+                FROM ranked_products r
+                WHERE brand IS NOT NULL
+                GROUP BY brand
+                """
+                
+                project_market_job = bigquery_client.query(project_market_query)
+                project_market_results = project_market_job.result()
+                
+                # Add project market data to the corresponding brands
+                for row in project_market_results:
+                    if row.brand in brand_data:
+                        brand_data[row.brand]["project_market_data"][market] = {
+                            "highest_ranking": row.highest_ranking,
+                            "total_products": row.total_products
+                        }
+        
+        # Add previous month data if available
+        if prev_month:
+            prev_month_query = f"""
+            WITH ranked_products AS (
+              SELECT
+                brand,
+                entity_id,
+                rank,
+                ROW_NUMBER() OVER (PARTITION BY brand ORDER BY rank ASC) as rank_within_brand
+              FROM `s360-demand-sensing.ds_master_transformed_data.bestseller_monthly`
+              WHERE country_code = '{inspiration_market}'
+              AND date_month = '{prev_month}'
+              {category_filter}
+            )
+            
+            SELECT
+              brand,
+              MIN(rank) as highest_ranking,
+              COUNT(DISTINCT entity_id) as total_products
+            FROM ranked_products r
+            WHERE brand IS NOT NULL
+            GROUP BY brand
+            """
+            
+            prev_month_job = bigquery_client.query(prev_month_query)
+            prev_month_results = prev_month_job.result()
+            
+            # Create lookup dictionary for previous month data
+            prev_month_data = {}
+            for row in prev_month_results:
+                prev_month_data[row.brand] = {
+                    "highest_ranking": row.highest_ranking,
+                    "total_products": row.total_products
+                }
+            
+            # Calculate month over month changes
+            for trend in trends:
+                if trend["brand"] in prev_month_data:
+                    prev_data = prev_month_data[trend["brand"]]
+                    
+                    # Calculate ranking change (negative is improvement, positive is decline)
+                    rank_change = trend["highest_ranking"] - prev_data["highest_ranking"]
+                    trend["highest_ranking_change"] = rank_change
+                    
+                    # Calculate total products change
+                    products_change = trend["total_products"] - prev_data["total_products"]
+                    trend["total_products_change"] = products_change
+                    trend["total_products_change_pct"] = (products_change / prev_data["total_products"]) * 100 if prev_data["total_products"] > 0 else 0
+                else:
+                    # No previous month data available
+                    trend["highest_ranking_change"] = None
+                    trend["total_products_change"] = None
+                    trend["total_products_change_pct"] = None
+        
+        return jsonify({
+            "success": True,
+            "trends": trends,
+            "count": len(trends),
+            "total": total_count,
+            "page": offset // limit + 1,
+            "pages": (total_count + limit - 1) // limit,
+            "filters": {
+                "inspiration_market": inspiration_market,
+                "date_month": date_month,
+                "categories": categories,
+                "project_markets": project_markets,
+                "prev_month": prev_month,
+                "limit": limit,
+                "offset": offset
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error fetching brand trends: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": f"Failed to fetch brand trends: {str(e)}"
+        }), 500
+
+@app.route("/api/user/trendspotting-preferences", methods=["GET"])
+@token_required
+def get_trendspotting_preferences(current_user):
+    """Get the filter preferences for the Brand Trends page"""
+    try:
+        # Get the user document from Firestore
+        user_ref = firestore_client.collection('users').document(current_user)
+        user_doc = user_ref.get()
+        
+        if not user_doc.exists:
+            return jsonify({
+                "success": False,
+                "error": "User document not found"
+            }), 404
+        
+        # Get the trendspotting_preferences from the user document (default to empty dict)
+        user_data = user_doc.to_dict()
+        trendspotting_preferences = user_data.get('trendspotting_preferences', {})
+        
+        # If no preferences found, apply defaults
+        if not trendspotting_preferences:
+            # Default to US as inspiration market
+            trendspotting_preferences = {
+                "selectedInspirationMarkets": ["US"],
+                "selectedProjectMarkets": [],  # Will be populated client-side with up to 3 available markets
+                "selectedInspirationCategories": []
+            }
+            
+        return jsonify({
+            "success": True,
+            "data": trendspotting_preferences
+        })
+    except Exception as e:
+        print(f"Error getting trendspotting preferences: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+@app.route("/api/user/trendspotting-preferences", methods=["POST"])
+@token_required
+def save_trendspotting_preferences(current_user):
+    """Save filter preferences for the Brand Trends page"""
+    try:
+        # Get request data
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                "success": False,
+                "error": "Missing required data"
+            }), 400
+        
+        # Clean the preferences to only include necessary fields
+        preferences = {
+            # Handle both single and multi-select for inspiration markets
+            "selectedInspirationMarkets": data.get("selectedInspirationMarkets", []),
+            
+            # Handle multi-select for project markets
+            "selectedProjectMarkets": data.get("selectedProjectMarkets", []),
+            
+            # Handle multi-select for inspiration categories
+            "selectedInspirationCategories": data.get("selectedInspirationCategories", [])
+        }
+        
+        # Get the user document from Firestore
+        user_ref = firestore_client.collection('users').document(current_user)
+        user_doc = user_ref.get()
+        
+        if not user_doc.exists:
+            return jsonify({
+                "success": False,
+                "error": "User document not found"
+            }), 404
+        
+        # Update the trendspotting preferences
+        user_ref.update({
+            "trendspotting_preferences": preferences,
+            "updated_at": firestore.SERVER_TIMESTAMP
+        })
+        
+        return jsonify({
+            "success": True,
+            "message": "Trendspotting preferences saved successfully",
+            "data": preferences
+        })
+    except Exception as e:
+        print(f"Error saving trendspotting preferences: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route("/api/brand-trends/sparklines", methods=["GET"])
+@token_required
+@project_access_required
+def get_brand_sparklines(current_user, cloud_project_id=None):
+    """
+    Get brand-rank data for sparkline graphs.
+
+    Required query-string parameters
+    ────────────────────────────────
+    brands               – comma-separated list of brand names
+    inspiration_market   – ISO country / market code
+    date_month           – YYYY-MM-DD (last month to include)
+
+    Optional
+    categories[]         – repeatable list of category names
+    """
+    try:
+        # ───────────────────────────────
+        # 1. basic argument validation
+        # ───────────────────────────────
+        brands_raw          = request.args.get("brands")
+        inspiration_market  = request.args.get("inspiration_market")
+        date_month          = request.args.get("date_month")
+        categories          = request.args.getlist("categories[]")
+
+        if not all([brands_raw, inspiration_market, date_month]):
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "error": "Missing required parameters: brands, inspiration_market, and date_month",
+                    }
+                ),
+                400,
+            )
+
+        brands = [b.strip() for b in brands_raw.split(",") if b.strip()]
+        if len(brands) > 1000:                      # safeguard – BigQuery caps array size at 100k, but keep memory low
+            brands = brands[:1000]
+
+        try:
+            end_date   = datetime.strptime(date_month, "%Y-%m-%d")
+            start_date = (end_date.replace(day=1) - timedelta(days=366)).replace(day=1)
+        except ValueError:
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "error": f"Invalid date format: {date_month}. Expected YYYY-MM-DD.",
+                    }
+                ),
+                400,
+            )
+
+        # ───────────────────────────────
+        # 2. optional category handling
+        # ───────────────────────────────
+        category_mapping = {
+            "Office Supplies": 922, "Food, Beverages & Tobacco": 412, "Religious & Ceremonial": 5605,
+            "Vehicles & Parts": 888, "Business & Industrial": 111, "Software": 2092, "Toys & Games": 1239,
+            "Hardware": 632, "Baby & Toddler": 537, "Luggage & Bags": 5181, "Animals & Pet Supplies": 1,
+            "Apparel & Accessories": 166, "Furniture": 436, "Arts & Entertainment": 8, "Sporting Goods": 988,
+            "Home & Garden": 536, "Health & Beauty": 469, "Media": 783, "Cameras & Optics": 141,
+            "Mature": 772, "Electronics": 222,
+        }
+        category_ids = [category_mapping[c] for c in categories if c in category_mapping]
+
+        # ───────────────────────────────
+        # 3. parameterised BigQuery
+        # ───────────────────────────────
+        query = f"""
+        SELECT
+          EXTRACT(DATE FROM TIMESTAMP_TRUNC(_PARTITIONTIME, DAY)) AS date,
+          brand,
+          rank
+        FROM `s360-demand-sensing.ds_master_raw_data.BestSellersBrandMonthly_11097323`
+        WHERE LOWER(brand) IN UNNEST(@brand_list)
+          AND country_code = @market
+          {"AND category_id IN UNNEST(@category_ids)" if category_ids else ""}
+          AND EXTRACT(DATE FROM TIMESTAMP_TRUNC(_PARTITIONTIME, DAY))
+                BETWEEN @start_date AND @end_date
+        ORDER BY date, brand
+        """
+
+        params = [
+            bigquery.ArrayQueryParameter("brand_list", "STRING", [b.lower() for b in brands]),
+            bigquery.ScalarQueryParameter("market", "STRING", inspiration_market),
+            bigquery.ScalarQueryParameter("start_date", "DATE", start_date.date()),
+            bigquery.ScalarQueryParameter("end_date", "DATE", end_date.date()),
+        ]
+        if category_ids:
+            params.append(bigquery.ArrayQueryParameter("category_ids", "INT64", category_ids))
+
+        job_config = bigquery.QueryJobConfig(query_parameters=params)
+        results = bigquery_client.query(query, job_config=job_config).result()
+        # ───────────────────────────────
+        # 4. build response payload
+        # ───────────────────────────────
+        sparkline_data = {}
+        for row in results:
+            brand = row.brand
+            sparkline_data.setdefault(brand, []).append(
+                {
+                    "date": row.date.isoformat(),
+                    "rank": row.rank,
+                    # invert + cap so better rank draws higher point
+                    "value": 100 - min(row.rank, 100),
+                }
+            )
+
+        for series in sparkline_data.values():
+            series.sort(key=lambda p: p["date"])
+
+        return jsonify({"success": True, "sparkline_data": sparkline_data})
+
+    except Exception as exc:
+        # Log full traceback in real application logs
+        print(f"Error fetching brand sparklines: {exc}")
+        return (
+            jsonify({"success": False, "error": f"Failed to fetch brand sparklines: {exc}"}),
+            500,
+        )
+
+# If we're running this directly, then run the Flask app
+if __name__ == "__main__":
+    app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
