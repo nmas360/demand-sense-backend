@@ -4832,7 +4832,7 @@ def get_public_stream(stream_id):
         max_price = filters.get('maxPrice')
         
         if min_price is not None:
-            price_filter_clause += f"AND i.current_price >= {min_price}"
+            price_filter_clause += f"AND i.current_price >= {min_price} "
         if max_price is not None:
             price_filter_clause += f"AND i.current_price <= {max_price}"
         
@@ -6632,6 +6632,7 @@ def get_brand_trends(current_user, cloud_project_id=None):
     - sort_direction: asc or desc (default: asc)
     - categories[]: optional list of categories to filter by
     - project_markets[]: optional list of project markets to include comparison data
+    - brand_filter: optional string to filter brands by name
     - limit: number of results per page (default: 100)
     - offset: offset for pagination (default: 0)
     """
@@ -6643,6 +6644,7 @@ def get_brand_trends(current_user, cloud_project_id=None):
         sort_direction = request.args.get('sort_direction', 'asc').upper()
         categories = request.args.getlist('categories[]')
         project_markets = request.args.getlist('project_markets[]')
+        brand_filter = request.args.get('brand_filter', '')
         
         # Pagination parameters
         limit = request.args.get('limit', 100, type=int)
@@ -6683,6 +6685,13 @@ def get_brand_trends(current_user, cloud_project_id=None):
             
             category_filter = f"AND category IN ({', '.join(category_strings)})"
         
+        # Build brand filter clause if provided
+        brand_filter_clause = ""
+        if brand_filter:
+            # Escape single quotes for SQL
+            escaped_brand = brand_filter.replace("'", "''")
+            brand_filter_clause = f"AND LOWER(brand) LIKE LOWER('%{escaped_brand}%')"
+        
         # Build the query to get brand trends data for inspiration market
         query = f"""
         WITH ranked_products AS (
@@ -6696,6 +6705,7 @@ def get_brand_trends(current_user, cloud_project_id=None):
           WHERE country_code = '{inspiration_market}'
           AND date_month = '{date_month}'
           {category_filter}
+          {brand_filter_clause}
         )
         
         SELECT
@@ -6720,6 +6730,7 @@ def get_brand_trends(current_user, cloud_project_id=None):
           WHERE country_code = '{inspiration_market}'
           AND date_month = '{date_month}'
           {category_filter}
+          {brand_filter_clause}
         )
         
         SELECT
@@ -6732,11 +6743,10 @@ def get_brand_trends(current_user, cloud_project_id=None):
         with ThreadPoolExecutor(max_workers=2) as executor:
             query_future = executor.submit(bigquery_client.query, query)
             count_future = executor.submit(bigquery_client.query, count_query)
-            
             # Get results
             query_job = query_future.result()
             count_job = count_future.result()
-        
+
         # Process the results
         trends = []
         for row in query_job.result():
@@ -7061,7 +7071,8 @@ def get_brand_sparklines(current_user, cloud_project_id=None):
         ]
         if category_ids:
             params.append(bigquery.ArrayQueryParameter("category_ids", "INT64", category_ids))
-
+        print(query)
+        print(params)
         job_config = bigquery.QueryJobConfig(query_parameters=params)
         results = bigquery_client.query(query, job_config=job_config).result()
         # ───────────────────────────────
@@ -7078,7 +7089,7 @@ def get_brand_sparklines(current_user, cloud_project_id=None):
                     "value": 100 - min(row.rank, 100),
                 }
             )
-
+        print(sparkline_data)
         for series in sparkline_data.values():
             series.sort(key=lambda p: p["date"])
 
