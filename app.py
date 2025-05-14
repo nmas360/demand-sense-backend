@@ -443,11 +443,13 @@ def get_popular_products(current_user, cloud_project_id = None):
         title_filter = request.args.get('title_filter', None)
         
         # Get countries and merchant center ID
-        countries = request.args.getlist('countries[]')  # Get country filters
+        countries = request.args.getlist('countries[]')  # Get country filters - keeping for backward compatibility
+        original_codes = request.args.getlist('original_codes[]')  # Get original country codes for the products CTE
+        mapped_markets = request.args.getlist('mapped_markets[]')  # Get mapped markets for the bestseller filtering
 
         merchant_center_id = request.args.get('merchant_center_id', None)  # Get merchant center ID for country
         
-        # Get inventory status filters
+        # Get inventory status filters - now mapped to in_assortment values
         inventory_statuses = request.args.getlist('inventory_statuses[]')
         
         # Get pagination parameters
@@ -474,9 +476,14 @@ def get_popular_products(current_user, cloud_project_id = None):
             elif date_filter:
                 date_filter_clause = f"date_month = '{date_filter}'"
             
-            # Build the country filter part of the query
+            # Build the country filter part of the query for bestseller data
             country_filter_clause = ""
-            if countries and len(countries) > 0:
+            if mapped_markets and len(mapped_markets) > 0:
+                # Use mapped markets for bestseller filtering
+                country_strings = [f"'{country}'" for country in mapped_markets]
+                country_filter_clause = f"country_code IN ({', '.join(country_strings)})"
+            elif countries and len(countries) > 0:
+                # Fall back to original countries for backward compatibility
                 country_strings = [f"'{country}'" for country in countries]
                 country_filter_clause = f"country_code IN ({', '.join(country_strings)})"
             
@@ -536,6 +543,9 @@ def get_popular_products(current_user, cloud_project_id = None):
             else:
                 title_filter_clause = "1=1"  # Always true if no title filter
             
+            # Determine which country codes to use for products filtering
+            products_country_codes = original_codes if original_codes and len(original_codes) > 0 else countries
+            
             # Construct the SQL query with the correct merchant center ID
             # For multiple dates, we need to handle the time_period_mode differently
             if dates and len(dates) > 1:
@@ -563,40 +573,24 @@ def get_popular_products(current_user, cloud_project_id = None):
                       AND {combined_category_filter}
                       AND {title_filter_clause}
                       GROUP BY entity_id, title, country_code, brand, category, category_l2, category_l3, report_category_id
-                      HAVING COUNT(DISTINCT date_month) = {len(dates)}  -- Must appear in all selected months
+                      HAVING COUNT(DISTINCT date_month) = {len(dates)}
                     ),
-                    client_data AS (
-                      SELECT
-                        COALESCE(products.feed_label, products.target_country) AS country_code,
-                        mapping.entity_id,
-                        products.availability
-                      FROM
-                        (
-                          SELECT DISTINCT
-                            product_id,
-                            feed_label,
-                            target_country,
-                            availability
-                          FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
-                          WHERE _PARTITIONTIME = (
-                            SELECT MAX(_PARTITIONTIME)
-                            FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
-                          )
-                          AND channel = 'online'
-                          AND feed_label IN ({', '.join([f"'{country}'" for country in countries])})
-                        ) AS products
-                      LEFT JOIN
-                        (
-                          SELECT DISTINCT
-                            product_id,
-                            entity_id
-                          FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}`
-                          WHERE _PARTITIONTIME = (
-                            SELECT MAX(_PARTITIONTIME)
-                            FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}`
-                          )
-                        ) AS mapping
-                        ON mapping.product_id = products.product_id
+                    products AS (
+                      SELECT DISTINCT
+                        product_id
+                      FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
+                      WHERE _PARTITIONTIME = (
+                        SELECT MAX(_PARTITIONTIME)
+                        FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
+                      )
+                      AND channel = 'online'
+                      AND feed_label IN ({', '.join([f"'{country}'" for country in products_country_codes])})
+                    ),
+                    mapping AS (
+                      SELECT DISTINCT
+                        m.entity_id,
+                        m.product_id
+                      FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}` AS m
                     ),
                     final_data AS (
                       SELECT DISTINCT
@@ -613,13 +607,14 @@ def get_popular_products(current_user, cloud_project_id = None):
                          AND {date_filter_clause}) AS date_month,
                         months_data.avg_rank,
                         CASE 
-                          WHEN client_data.availability IS NOT NULL THEN 'IN_STOCK'
-                          ELSE 'NOT_IN_INVENTORY'
-                        END AS product_inventory_status
+                          WHEN products.product_id IS NOT NULL THEN 1
+                          ELSE 0
+                        END AS in_assortment
                       FROM months_data
-                      LEFT JOIN client_data 
-                      ON months_data.entity_id = client_data.entity_id
-                      AND months_data.country_code = client_data.country_code
+                      LEFT JOIN mapping 
+                      ON months_data.entity_id = mapping.entity_id
+                      LEFT JOIN products 
+                      ON mapping.product_id = products.product_id
                     )
                     """
                 else:
@@ -644,38 +639,22 @@ def get_popular_products(current_user, cloud_project_id = None):
                       AND {title_filter_clause}
                       GROUP BY entity_id, title, country_code, brand, category, category_l2, category_l3, report_category_id
                     ),
-                    client_data AS (
-                      SELECT
-                        COALESCE(products.feed_label, products.target_country) AS country_code,
-                        mapping.entity_id,
-                        products.availability
-                      FROM
-                        (
-                          SELECT DISTINCT
-                            product_id,
-                            feed_label,
-                            target_country,
-                            availability
-                          FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
-                          WHERE _PARTITIONTIME = (
-                            SELECT MAX(_PARTITIONTIME)
-                            FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
-                          )
-                          AND channel = 'online'
-                          AND feed_label IN ({', '.join([f"'{country}'" for country in countries])})
-                        ) AS products
-                      LEFT JOIN
-                        (
-                          SELECT
-                            product_id,
-                            entity_id
-                          FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}`
-                          WHERE _PARTITIONTIME = (
-                            SELECT MAX(_PARTITIONTIME)
-                            FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}`
-                          )
-                        ) AS mapping
-                        ON mapping.product_id = products.product_id
+                    products AS (
+                      SELECT DISTINCT
+                        product_id
+                      FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
+                      WHERE _PARTITIONTIME = (
+                        SELECT MAX(_PARTITIONTIME)
+                        FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
+                      )
+                      AND channel = 'online'
+                      AND feed_label IN ({', '.join([f"'{country}'" for country in products_country_codes])})
+                    ),
+                    mapping AS (
+                      SELECT DISTINCT
+                        m.entity_id,
+                        m.product_id
+                      FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}` AS m
                     ),
                     final_data AS (
                       SELECT
@@ -692,13 +671,14 @@ def get_popular_products(current_user, cloud_project_id = None):
                          AND {date_filter_clause}) AS date_month,
                         months_data.avg_rank,
                         CASE 
-                          WHEN client_data.availability IS NOT NULL THEN 'IN_STOCK'
-                          ELSE 'NOT_IN_INVENTORY'
-                        END AS product_inventory_status
+                          WHEN products.product_id IS NOT NULL THEN 1
+                          ELSE 0
+                        END AS in_assortment
                       FROM months_data
-                      LEFT JOIN client_data 
-                      ON months_data.entity_id = client_data.entity_id
-                      AND months_data.country_code = client_data.country_code
+                      LEFT JOIN mapping 
+                      ON months_data.entity_id = mapping.entity_id
+                      LEFT JOIN products 
+                      ON mapping.product_id = products.product_id
                     )
                     """
             else:
@@ -723,38 +703,22 @@ def get_popular_products(current_user, cloud_project_id = None):
                   AND {combined_category_filter}
                   AND {title_filter_clause}
                 ),
-                client_data AS (
-                  SELECT
-                    COALESCE(products.feed_label, products.target_country) AS country_code,
-                    mapping.entity_id,
-                    products.availability
-                  FROM
-                    (
-                      SELECT DISTINCT
-                        product_id,
-                        feed_label,
-                        target_country,
-                        availability
-                      FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
-                      WHERE _PARTITIONTIME = (
-                        SELECT MAX(_PARTITIONTIME)
-                        FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
-                      )
-                      AND channel = 'online'
-                      AND feed_label IN ({', '.join([f"'{country}'" for country in countries])})
-                    ) AS products
-                  LEFT JOIN
-                    (
-                      SELECT
-                        product_id,
-                        entity_id
-                      FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}`
-                      WHERE _PARTITIONTIME = (
-                        SELECT MAX(_PARTITIONTIME)
-                        FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}`
-                      )
-                    ) AS mapping
-                    ON mapping.product_id = products.product_id
+                products AS (
+                  SELECT DISTINCT
+                    product_id
+                  FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
+                  WHERE _PARTITIONTIME = (
+                    SELECT MAX(_PARTITIONTIME)
+                    FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
+                  )
+                  AND channel = 'online'
+                  AND feed_label IN ({', '.join([f"'{country}'" for country in products_country_codes])})
+                ),
+                mapping AS (
+                  SELECT DISTINCT
+                    m.entity_id,
+                    m.product_id
+                  FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}` AS m
                 ),
                 final_data AS (
                   SELECT DISTINCT
@@ -769,25 +733,40 @@ def get_popular_products(current_user, cloud_project_id = None):
                     main_bestseller.date_month,
                     main_bestseller.avg_rank,
                     CASE 
-                      WHEN client_data.availability IS NOT NULL THEN 'IN_STOCK'
-                      ELSE 'NOT_IN_INVENTORY'
-                    END AS product_inventory_status
+                      WHEN products.product_id IS NOT NULL THEN 1
+                      ELSE 0
+                    END AS in_assortment
                   FROM main_bestseller
-                  LEFT JOIN client_data 
-                  ON main_bestseller.entity_id = client_data.entity_id
-                  AND main_bestseller.country_code = client_data.country_code
+                  LEFT JOIN mapping 
+                  ON main_bestseller.entity_id = mapping.entity_id
+                  LEFT JOIN products 
+                  ON mapping.product_id = products.product_id
                 )
                 """
 
-            # Add inventory status filter if provided
-            query += "\nSELECT DISTINCT report_category_id, category, category_l2, category_l3, entity_id, title, country_code, brand, date_month, avg_rank, product_inventory_status FROM final_data"
+            # Add inventory status filter if provided, mapping it to in_assortment
+            query += "\nSELECT DISTINCT report_category_id, category, category_l2, category_l3, entity_id, title, country_code, brand, date_month, avg_rank, in_assortment FROM final_data"
             
-            # Apply inventory status filter to main query if provided
+            # Apply inventory status filter to main query if provided, translating to in_assortment
             if inventory_statuses and len(inventory_statuses) > 0:
-                inventory_statuses_str = [f"'{status}'" for status in inventory_statuses]
-                query += f"\nWHERE product_inventory_status IN ({', '.join(inventory_statuses_str)})"
+                # Map the old inventory statuses to new in_assortment values
+                # 'IN_STOCK' -> in_assortment = 1
+                # 'NOT_IN_INVENTORY' -> in_assortment = 0
+                in_assortment_values = []
+                for status in inventory_statuses:
+                    if status == 'IN_STOCK':
+                        in_assortment_values.append('1')
+                    elif status == 'NOT_IN_INVENTORY':
+                        in_assortment_values.append('0')
+                
+                if in_assortment_values:
+                    query += f"\nWHERE in_assortment IN ({', '.join(in_assortment_values)})"
             
             # Add ordering and pagination
+            # If sort_column is product_inventory_status, we need to change it to in_assortment
+            if sort_column == "product_inventory_status":
+                sort_column = "in_assortment"
+                
             query += f"\nORDER BY {sort_column} {sort_direction}"
             query += f"\nLIMIT {limit} OFFSET {offset}"
 
@@ -809,48 +788,38 @@ def get_popular_products(current_user, cloud_project_id = None):
                       AND {combined_category_filter}
                       AND {title_filter_clause}
                       GROUP BY entity_id, country_code, brand
-                      HAVING COUNT(DISTINCT date_month) = {len(dates)}  -- Must appear in all selected months
+                      HAVING COUNT(DISTINCT date_month) = {len(dates)} 
                     ),
-                    client_data AS (
-                      SELECT
-                        mapping.entity_id,
-                        COALESCE(products.feed_label, products.target_country) AS country_code
-                      FROM
-                        (
-                          SELECT *
-                          FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
-                          WHERE _PARTITIONTIME = (
-                            SELECT MAX(_PARTITIONTIME)
-                            FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
-                          )
-                          AND channel = 'online'
-                          AND feed_label IN ({', '.join([f"'{country}'" for country in countries])})
-                        ) AS products
-                      LEFT JOIN
-                        (
-                          SELECT
-                            product_id,
-                            entity_id
-                          FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}`
-                          WHERE _PARTITIONTIME = (
-                            SELECT MAX(_PARTITIONTIME)
-                            FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}`
-                          )
-                        ) AS mapping
-                        ON mapping.product_id = products.product_id
+                    products AS (
+                      SELECT DISTINCT
+                        product_id
+                      FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
+                      WHERE _PARTITIONTIME = (
+                        SELECT MAX(_PARTITIONTIME)
+                        FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
+                      )
+                      AND channel = 'online'
+                      AND feed_label IN ({', '.join([f"'{country}'" for country in products_country_codes])})
+                    ),
+                    mapping AS (
+                      SELECT DISTINCT
+                        m.entity_id,
+                        m.product_id
+                      FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}` AS m
                     ),
                     final_count AS (
                       SELECT
                         months_count.entity_id,
                         months_count.brand,
                         CASE 
-                          WHEN client_data.entity_id IS NOT NULL THEN 'IN_STOCK'
-                          ELSE 'NOT_IN_INVENTORY'
-                        END AS product_inventory_status
+                          WHEN products.product_id IS NOT NULL THEN 1
+                          ELSE 0
+                        END AS in_assortment
                       FROM months_count
-                      LEFT JOIN client_data 
-                      ON months_count.entity_id = client_data.entity_id
-                      AND months_count.country_code = client_data.country_code
+                      LEFT JOIN mapping 
+                      ON months_count.entity_id = mapping.entity_id
+                      LEFT JOIN products 
+                      ON mapping.product_id = products.product_id
                     )
                     """
                 else:
@@ -869,46 +838,36 @@ def get_popular_products(current_user, cloud_project_id = None):
                       AND {title_filter_clause}
                       GROUP BY entity_id, country_code, brand
                     ),
-                    client_data AS (
-                      SELECT
-                        mapping.entity_id,
-                        COALESCE(products.feed_label, products.target_country) AS country_code
-                      FROM
-                        (
-                          SELECT *
-                          FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
-                          WHERE _PARTITIONTIME = (
-                            SELECT MAX(_PARTITIONTIME)
-                            FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
-                          )
-                          AND channel = 'online'
-                          AND feed_label IN ({', '.join([f"'{country}'" for country in countries])})
-                        ) AS products
-                      LEFT JOIN
-                        (
-                          SELECT
-                            product_id,
-                            entity_id
-                          FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}`
-                          WHERE _PARTITIONTIME = (
-                            SELECT MAX(_PARTITIONTIME)
-                            FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}`
-                          )
-                        ) AS mapping
-                        ON mapping.product_id = products.product_id
+                    products AS (
+                      SELECT DISTINCT
+                        product_id
+                      FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
+                      WHERE _PARTITIONTIME = (
+                        SELECT MAX(_PARTITIONTIME)
+                        FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
+                      )
+                      AND channel = 'online'
+                      AND feed_label IN ({', '.join([f"'{country}'" for country in products_country_codes])})
+                    ),
+                    mapping AS (
+                      SELECT DISTINCT
+                        m.entity_id,
+                        m.product_id
+                      FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}` AS m
                     ),
                     final_count AS (
                       SELECT
                         months_count.entity_id,
                         months_count.brand,
                         CASE 
-                          WHEN client_data.entity_id IS NOT NULL THEN 'IN_STOCK'
-                          ELSE 'NOT_IN_INVENTORY'
-                        END AS product_inventory_status
+                          WHEN products.product_id IS NOT NULL THEN 1
+                          ELSE 0
+                        END AS in_assortment
                       FROM months_count
-                      LEFT JOIN client_data 
-                      ON months_count.entity_id = client_data.entity_id
-                      AND months_count.country_code = client_data.country_code
+                      LEFT JOIN mapping 
+                      ON months_count.entity_id = mapping.entity_id
+                      LEFT JOIN products 
+                      ON mapping.product_id = products.product_id
                     )
                     """
             else:
@@ -928,46 +887,36 @@ def get_popular_products(current_user, cloud_project_id = None):
                   AND {combined_category_filter}
                   AND {title_filter_clause}
                 ),
-                client_data AS (
-                  SELECT
-                    mapping.entity_id,
-                    COALESCE(products.feed_label, products.target_country) AS country_code
-                  FROM
-                    (
-                      SELECT *
-                      FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
-                      WHERE _PARTITIONTIME = (
-                        SELECT MAX(_PARTITIONTIME)
-                        FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
-                      )
-                      AND channel = 'online'
-                      AND feed_label IN ({', '.join([f"'{country}'" for country in countries])})
-                    ) AS products
-                  LEFT JOIN
-                    (
-                      SELECT
-                        product_id,
-                        entity_id
-                      FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}`
-                      WHERE _PARTITIONTIME = (
-                        SELECT MAX(_PARTITIONTIME)
-                        FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}`
-                      )
-                    ) AS mapping
-                    ON mapping.product_id = products.product_id
+                products AS (
+                  SELECT DISTINCT
+                    product_id
+                  FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
+                  WHERE _PARTITIONTIME = (
+                    SELECT MAX(_PARTITIONTIME)
+                    FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
+                  )
+                  AND channel = 'online'
+                  AND feed_label IN ({', '.join([f"'{country}'" for country in products_country_codes])})
+                ),
+                mapping AS (
+                  SELECT DISTINCT
+                    m.entity_id,
+                    m.product_id
+                  FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}` AS m
                 ),
                 final_count AS (
                   SELECT
                     main_bestseller.entity_id,
                     main_bestseller.brand,
                     CASE 
-                      WHEN client_data.entity_id IS NOT NULL THEN 'IN_STOCK'
-                      ELSE 'NOT_IN_INVENTORY'
-                    END AS product_inventory_status
+                      WHEN products.product_id IS NOT NULL THEN 1
+                      ELSE 0
+                    END AS in_assortment
                   FROM main_bestseller
-                  LEFT JOIN client_data 
-                  ON main_bestseller.entity_id = client_data.entity_id
-                  AND main_bestseller.country_code = client_data.country_code
+                  LEFT JOIN mapping 
+                  ON main_bestseller.entity_id = mapping.entity_id
+                  LEFT JOIN products 
+                  ON mapping.product_id = products.product_id
                 )
                 """
 
@@ -981,8 +930,16 @@ def get_popular_products(current_user, cloud_project_id = None):
 
             # Add inventory status filter to count query if provided
             if inventory_statuses and len(inventory_statuses) > 0:
-                inventory_statuses_str = [f"'{status}'" for status in inventory_statuses]
-                count_query += f"\nWHERE product_inventory_status IN ({', '.join(inventory_statuses_str)})"
+                # Map the old inventory statuses to new in_assortment values
+                in_assortment_values = []
+                for status in inventory_statuses:
+                    if status == 'IN_STOCK':
+                        in_assortment_values.append('1')
+                    elif status == 'NOT_IN_INVENTORY':
+                        in_assortment_values.append('0')
+                
+                if in_assortment_values:
+                    count_query += f"\nWHERE in_assortment IN ({', '.join(in_assortment_values)})"
             
             # Execute both queries in parallel using ThreadPoolExecutor
             with ThreadPoolExecutor(max_workers=2) as executor:
@@ -995,6 +952,7 @@ def get_popular_products(current_user, cloud_project_id = None):
             
             # Convert products results to list of dictionaries
             for row in products_job.result():
+                # Create a product dictionary with backward compatibility for product_inventory_status
                 product = {
                     "report_category_id": row.report_category_id,
                     "category": row.category,
@@ -1006,7 +964,9 @@ def get_popular_products(current_user, cloud_project_id = None):
                     "brand": row.brand,
                     "date_month": row.date_month.isoformat() if row.date_month else None,
                     "avg_rank": row.avg_rank,
-                    "product_inventory_status": row.product_inventory_status
+                    "in_assortment": row.in_assortment,
+                    # Keep product_inventory_status for backward compatibility
+                    "product_inventory_status": "IN_STOCK" if row.in_assortment == 1 else "NOT_IN_INVENTORY"
                 }
                 products.append(product)
             
@@ -1018,7 +978,7 @@ def get_popular_products(current_user, cloud_project_id = None):
                 unique_brands_count = row.unique_brands_count
                 break  # Only need the first row
 
-
+        print(query)
         return jsonify({
             "products": products, 
             "count": len(products),
@@ -1034,7 +994,7 @@ def get_popular_products(current_user, cloud_project_id = None):
         
     except Exception as e:
         print(f"Error querying BigQuery: {str(e)}")
-        return jsonify({"error": f"Failed to fetch popular products: {str(e)}"}), 500
+        return jsonify({"error": f"Failed to fetch popular products: {str(e)}"}), 500 
 
 @app.route("/api/categories", methods=["GET"])
 @token_required
@@ -1042,8 +1002,15 @@ def get_popular_products(current_user, cloud_project_id = None):
 def get_categories(current_user, cloud_project_id=None):
     try:
         # Get request parameters
-        country = request.args.get('country')
+        country = request.args.get('country')  # Keep for backward compatibility
         merchant_center_id = request.args.get('merchant_center_id')
+        
+        # Get new parameters for mapped market and original code
+        mapped_market = request.args.get('mapped_market')  # For bestseller filtering
+        original_code = request.args.get('original_code')  # For products filtering
+        
+        # Add debug logging for parameter values
+        print(f"DEBUG: Parameters received - mapped_market: {mapped_market}, original_code: {original_code}, country: {country}")
         
         # Get date parameters if they exist (for bestseller filtering)
         date_filter = request.args.get('date', None)
@@ -1062,27 +1029,38 @@ def get_categories(current_user, cloud_project_id=None):
             elif date_filter:
                 date_filter_clause = f"AND date_month = '{date_filter}'"
             
-            # Build country filter clause
+            # Build country filter clause for bestseller data - use mapped_market if available
             country_filter_clause = ""
-            if country:
+            if mapped_market:
+                country_filter_clause = f"AND country_code = '{mapped_market}'"
+                print(f"DEBUG: Using mapped_market for bestseller filtering: {mapped_market}")
+            elif country:
                 country_filter_clause = f"AND country_code = '{country}'"
+                print(f"DEBUG: Using country for bestseller filtering (fallback): {country}")
+            
+            # Determine which country code to use for products filtering - use original_code if available
+            products_country_code = original_code if original_code else (country if country else "")
+            print(f"DEBUG: Using products_country_code for products filtering: {products_country_code}")
+            
+            if not products_country_code:
+                return jsonify({"error": "Missing country parameter"}), 400
 
             query = f"""
             WITH products AS (
               SELECT DISTINCT
                 offer_id,
-                product_id,
+                product_id
               FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
               WHERE _PARTITIONTIME = (SELECT MAX(_PARTITIONTIME) FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`)
-              AND availability = 'in stock'
               AND channel = 'online'
-              AND LOWER(feed_label) = '{country.lower()}'
+              AND LOWER(feed_label) = '{products_country_code.lower()}'
             ),
 
             bestseller_main AS (
               SELECT DISTINCT
                 category,
-                entity_id
+                entity_id,
+                title
               FROM `{master_project_id}.ds_master_transformed_data.bestseller_monthly`
               WHERE 1=1 {date_filter_clause} {country_filter_clause}
             ),
@@ -1091,7 +1069,8 @@ def get_categories(current_user, cloud_project_id=None):
               SELECT DISTINCT
                 m.entity_id,
                 m.product_id,
-                bm.category
+                bm.category,
+                bm.title
               FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}` AS m
               LEFT JOIN bestseller_main AS bm
               ON bm.entity_id = m.entity_id
@@ -1101,16 +1080,21 @@ def get_categories(current_user, cloud_project_id=None):
               SELECT
                 m.entity_id,
                 m.category,
-                p.* 
-              FROM products AS p
-              LEFT JOIN mapping AS m
-              ON p.product_id = m.product_id
+                m.title,
+                CASE WHEN p.product_id IS NOT NULL THEN 1 ELSE 0 END AS in_assortment
+              FROM mapping AS m
+              LEFT JOIN products AS p
+              ON m.product_id = p.product_id
+              WHERE m.entity_id IS NOT NULL
             ),
             
             category_counts AS (
               SELECT
                 category AS level_1,
-                COUNT(DISTINCT entity_id) AS products_in_stock
+                COUNT(DISTINCT entity_id) AS total_entities,
+                COUNT(DISTINCT title) AS total_products,
+                SUM(CASE WHEN in_assortment = 1 THEN 1 ELSE 0 END) AS in_assortment_entity_count,
+                COUNT(DISTINCT CASE WHEN in_assortment = 1 THEN title ELSE NULL END) AS in_assortment_count
               FROM final
               WHERE category IS NOT NULL
               GROUP BY 1
@@ -1120,11 +1104,14 @@ def get_categories(current_user, cloud_project_id=None):
             SELECT DISTINCT
                 t.google_cat_id,
                 t.level_1,
-                COALESCE(c.products_in_stock, 0) AS count_products
+                COALESCE(c.total_products, 0) AS total_products,
+                COALESCE(c.in_assortment_count, 0) AS in_assortment_count,
+                COALESCE(c.total_entities, 0) AS total_entities,
+                COALESCE(c.in_assortment_entity_count, 0) AS in_assortment_entity_count
             FROM `{master_project_id}.ds_master_transformed_data.google_taxonomy` AS t
             LEFT JOIN category_counts AS c
             ON t.level_1 = c.level_1
-            ORDER BY count_products DESC, t.level_1 ASC
+            ORDER BY total_products DESC, t.level_1 ASC
             """
         else:
             # Fallback to original query if missing cloud_project_id or merchant_center_id
@@ -1132,25 +1119,46 @@ def get_categories(current_user, cloud_project_id=None):
             SELECT 
                 google_cat_id, 
                 level_1,
-                0 AS count_products
+                0 AS total_products,
+                0 AS in_assortment_count,
+                0 AS total_entities,
+                0 AS in_assortment_entity_count
             FROM `{master_project_id}.ds_master_transformed_data.google_taxonomy`
             """
         
+        print(query)
         # Execute the query
         query_job = bigquery_client.query(query)
         results = query_job.result()
         
         # Convert to dictionary for easy lookup of id->name
         categories = {}
-        # Create a dictionary to store category counts
+        # Create dictionaries to store category counts
         category_counts = {}
+        category_in_assortment_counts = {}
+        
+        # Add new dictionaries for entity counts
+        category_entity_counts = {}
+        category_in_assortment_entity_counts = {}
         
         for row in results:
             # Store keys as integers instead of strings
             categories[row.google_cat_id] = row.level_1
-            # Store the count for each category name
-            if row.level_1 not in category_counts or (row.count_products > category_counts[row.level_1]):
-                category_counts[row.level_1] = row.count_products
+            
+            # Store the total count for each category name
+            if row.level_1 not in category_counts or (row.total_products > category_counts[row.level_1]):
+                category_counts[row.level_1] = row.total_products
+            
+            # Store the in_assortment count for each category
+            if row.level_1 not in category_in_assortment_counts or (row.in_assortment_count > category_in_assortment_counts[row.level_1]):
+                category_in_assortment_counts[row.level_1] = row.in_assortment_count
+                
+            # Store entity counts for comparison
+            if row.level_1 not in category_entity_counts or (row.total_entities > category_entity_counts[row.level_1]):
+                category_entity_counts[row.level_1] = row.total_entities
+                
+            if row.level_1 not in category_in_assortment_entity_counts or (row.in_assortment_entity_count > category_in_assortment_entity_counts[row.level_1]):
+                category_in_assortment_entity_counts[row.level_1] = row.in_assortment_entity_count
         
         # Create a list of unique level_1 category names for filtering
         distinct_categories = list(set(categories.values()))
@@ -1168,11 +1176,14 @@ def get_categories(current_user, cloud_project_id=None):
             "categories": categories,
             "distinct_categories": distinct_categories,
             "categories_grouped": categories_grouped,
-            "category_counts": category_counts
+            "category_counts": category_counts,
+            "category_in_assortment_counts": category_in_assortment_counts,
+            "category_entity_counts": category_entity_counts,
+            "category_in_assortment_entity_counts": category_in_assortment_entity_counts
         })
     except Exception as e:
         print(f"Error fetching categories: {str(e)}")
-        return jsonify({"error": f"Failed to fetch categories: {str(e)}"}), 500
+        return jsonify({"error": f"Failed to fetch categories: {str(e)}"}), 500 
 
 @app.route("/api/complete_category_hierarchy", methods=["GET"])
 @token_required
@@ -1422,7 +1433,7 @@ def get_product_history(current_user, entity_id, cloud_project_id=None):
         FROM `s360-demand-sensing.ds_master_transformed_data.entity_gtins` 
         WHERE entity_id = '{entity_id}'
         """
-        
+        print(query)
         gtin_query_job = bigquery_client.query(gtin_query)
         gtin_results = gtin_query_job.result()
         
@@ -1431,7 +1442,8 @@ def get_product_history(current_user, entity_id, cloud_project_id=None):
         for row in gtin_results:
             if row.gtin:  # Only add non-None GTINs
                 gtins.append(row.gtin)
-        
+        print(entity_id)
+        print(history)
         return jsonify({
             "entity_id": entity_id,
             "title": product_title,
@@ -4272,7 +4284,7 @@ def get_pricing_data(current_user, cloud_project_id = None):
           ROUND(t.last7days_clicks * i.predicted_clicks_change_fraction,0) as potential_extra_clicks
         FROM last7days AS t
         LEFT JOIN latest_insights AS i
-          ON t.offer_id = i.offer_id
+            ON lower(t.offer_id) = lower(i.offer_id)
         WHERE
           i.predicted_impressions_change_fraction is not null
           {brand_filter_clause}
@@ -4325,7 +4337,7 @@ def get_pricing_data(current_user, cloud_project_id = None):
           AVG(i.predicted_clicks_change_fraction) as avg_predicted_clicks_change
         FROM last7days AS t
         LEFT JOIN latest_insights AS i
-          ON t.offer_id = i.offer_id
+          ON lower(t.offer_id) = lower(i.offer_id)
         WHERE
           i.predicted_impressions_change_fraction is not null
           {brand_filter_clause}
@@ -4885,7 +4897,7 @@ def get_public_stream(stream_id):
           ROUND(t.last7days_clicks * i.predicted_clicks_change_fraction,0) as potential_extra_clicks
         FROM last7days AS t
         LEFT JOIN latest_insights AS i
-          ON t.offer_id = i.offer_id
+          ON LOWER(t.offer_id) = LOWER(i.offer_id)
         WHERE
           i.predicted_impressions_change_fraction is not null
           {brand_filter_clause}
@@ -4896,7 +4908,6 @@ def get_public_stream(stream_id):
           {product_type_l3_clause}
           {price_filter_clause}
         ORDER BY potential_extra_clicks DESC
-        LIMIT 5000
         """
 
         # Execute the BQ query
