@@ -996,8 +996,8 @@ def get_user_lists(current_user):
         shared_lists = list(lists_ref.where('shared_with', 'array_contains', current_user).where('project_id', '==', project_id).stream())
         
         # Combine lists
-        all_lists = owned_lists + shared_lists
-        
+        all_lists = owner_lists + shared_lists
+
         # Get connection to PostgreSQL
         conn = get_db_connection()
         
@@ -1012,7 +1012,7 @@ def get_user_lists(current_user):
                 for list_doc in all_lists:
                     list_data = list_doc.to_dict()
                     list_id = list_doc.id
-                    
+
                     # Add list metadata to result
                     list_meta = {
                         "id": list_id,
@@ -1025,7 +1025,7 @@ def get_user_lists(current_user):
                         "is_owner": list_data.get("owner") == current_user
                     }
                     result["lists"].append(list_meta)
-                    
+
                     # Get items for this list
                     cursor.execute(
                         "SELECT entity_id FROM user_lists WHERE list_id = %s",
@@ -1043,7 +1043,7 @@ def get_user_lists(current_user):
                             "id": list_id,
                             "name": list_data.get("name")
                         })
-            
+
             return jsonify({
                 "success": True,
                 "data": result
@@ -1820,10 +1820,10 @@ def get_all_project_list_items(current_user, project_id):
     try:
         # Get all lists for the user in this project
         lists_ref = firestore_client.collection('user_lists')
-        owned_lists = list(lists_ref.where('owner', '==', current_user).where('project_id', '==', project_id).stream())
+        owner_lists = list(lists_ref.where('owner', '==', current_user).where('project_id', '==', project_id).stream())
         shared_lists = list(lists_ref.where('shared_with', 'array_contains', current_user).where('project_id', '==', project_id).stream())
         
-        all_lists = owned_lists + shared_lists
+        all_lists = owner_lists + shared_lists
         
         # Get connection to PostgreSQL
         conn = get_db_connection()
