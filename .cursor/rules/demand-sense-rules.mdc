@@ -1,0 +1,29 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+When working with this demand-sensing-backend project, utils should be imported at the top of Python files using the following pattern:
+
+from utils.imports import *
+from utils.config import *
+from utils.decorators import *
+
+Do not import individual functions from utils modules - always use the wildcard import pattern as shown above.
+
+IMPORTANT: If you make changes to utils modules or add new modules:
+1. When adding new external libraries, add them to imports.py
+2. When adding configuration variables, add them to config.py
+3. When adding decorators or wrapper functions, add them to decorators.py
+4. If adding a new utils module, update this rule and inform team members to include the new import pattern
+
+MERCHANT CENTER CONFIGURATION:
+When working with merchant centers in this project, understand the difference between "code" and "mappedMarket":
+- "code" represents the actual country or market code for the merchant center (e.g., "dk" for Denmark)
+- "mappedMarket" is used when a merchant center's data should be treated as belonging to a different market for analysis purposes
+- If "mappedMarket" is not specified, the system defaults to using the "code" value
+
+- When querying data, use "code" for feed_label filtering in _products tables
+- When filtering by market for analysis purposes (e.g., country_code in the bestseller tables), use "mappedMarket"
+
+- When displaying data, the system will use "mappedMarket" if available, otherwise it falls back to "code"

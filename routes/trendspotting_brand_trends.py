@@ -272,6 +272,14 @@ def get_brand_trends(current_user, cloud_project_id=None):
 def get_trendspotting_preferences(current_user):
     """Get the filter preferences for the Brand Trends page"""
     try:
+        # Get project_id from query parameters
+        project_id = request.args.get('project_id')
+        if not project_id:
+            return jsonify({
+                "success": False,
+                "error": "Missing required parameter: project_id"
+            }), 400
+            
         # Get the user document from Firestore
         user_ref = firestore_client.collection('users').document(current_user)
         user_doc = user_ref.get()
@@ -282,22 +290,45 @@ def get_trendspotting_preferences(current_user):
                 "error": "User document not found"
             }), 404
         
-        # Get the trendspotting_preferences from the user document (default to empty dict)
+        # Get the user data
         user_data = user_doc.to_dict()
+        
+        # Get project-specific trendspotting preferences
+        # New structure: trendspotting_preferences is a dict with project_id as keys
         trendspotting_preferences = user_data.get('trendspotting_preferences', {})
         
-        # If no preferences found, apply defaults
-        if not trendspotting_preferences:
-            # Default to US as inspiration market
-            trendspotting_preferences = {
-                "selectedInspirationMarkets": ["US"],
-                "selectedProjectMarkets": [],  # Will be populated client-side with up to 3 available markets
-                "selectedInspirationCategories": []
-            }
+        # Get project-specific preferences, or create defaults
+        project_preferences = trendspotting_preferences.get(project_id, {})
+        
+        # If no preferences found for this project, use defaults
+        # But first check if we have old-style preferences to migrate
+        if not project_preferences:
+            # Check for old-style preferences (not project-specific)
+            if isinstance(trendspotting_preferences, dict) and any(key in trendspotting_preferences for key in ['selectedInspirationMarkets', 'selectedProjectMarkets', 'selectedInspirationCategories']):
+                # Migrate old preferences to new project-specific format
+                project_preferences = {
+                    "selectedInspirationMarkets": trendspotting_preferences.get("selectedInspirationMarkets", ["US"]),
+                    "selectedProjectMarkets": trendspotting_preferences.get("selectedProjectMarkets", []),
+                    "selectedInspirationCategories": trendspotting_preferences.get("selectedInspirationCategories", [])
+                }
+                
+                # Update user document with migrated preferences
+                new_preferences = {project_id: project_preferences}
+                user_ref.update({
+                    "trendspotting_preferences": new_preferences,
+                    "updated_at": firestore.SERVER_TIMESTAMP
+                })
+            else:
+                # Default to US as inspiration market
+                project_preferences = {
+                    "selectedInspirationMarkets": ["US"],
+                    "selectedProjectMarkets": [],  # Will be populated client-side with up to 3 available markets
+                    "selectedInspirationCategories": []
+                }
             
         return jsonify({
             "success": True,
-            "data": trendspotting_preferences
+            "data": project_preferences
         })
     except Exception as e:
         print(f"Error getting trendspotting preferences: {str(e)}")
@@ -318,6 +349,14 @@ def save_trendspotting_preferences(current_user):
             return jsonify({
                 "success": False,
                 "error": "Missing required data"
+            }), 400
+            
+        # Get project_id from the request
+        project_id = data.get('project_id')
+        if not project_id:
+            return jsonify({
+                "success": False,
+                "error": "Missing required field: project_id"
             }), 400
         
         # Clean the preferences to only include necessary fields
@@ -341,10 +380,22 @@ def save_trendspotting_preferences(current_user):
                 "success": False,
                 "error": "User document not found"
             }), 404
+            
+        # Get existing trendspotting preferences
+        user_data = user_doc.to_dict()
+        existing_preferences = user_data.get('trendspotting_preferences', {})
+        
+        # Check if existing preferences use the old format (not project-specific)
+        if isinstance(existing_preferences, dict) and any(key in existing_preferences for key in ['selectedInspirationMarkets', 'selectedProjectMarkets', 'selectedInspirationCategories']):
+            # Convert to new format
+            existing_preferences = {}
+        
+        # Update preferences for this project only
+        existing_preferences[project_id] = preferences
         
         # Update the trendspotting preferences
         user_ref.update({
-            "trendspotting_preferences": preferences,
+            "trendspotting_preferences": existing_preferences,
             "updated_at": firestore.SERVER_TIMESTAMP
         })
         

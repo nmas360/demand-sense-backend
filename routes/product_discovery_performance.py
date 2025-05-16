@@ -8,330 +8,402 @@ from urllib.parse import quote
 product_discovery_performance_bp = Blueprint('product_discovery_performance', __name__)
 
 
-@product_discovery_performance_bp.route("/api/admin/category-assortment-analysis", methods=["GET"])
-def analyze_category_assortment(current_user=""):
-    """
-    Admin endpoint to analyze all projects and merchant centers,
-    finding the categories with the most products in assortment.
-    This endpoint is secured with a scheduler token and is meant to be called only by Google Cloud Scheduler.
-    """
-    # Check for the scheduler token in the Authorization header
-    #scheduler_token = os.environ.get("SCHEDULER_TOKEN")
-    #if not scheduler_token:
-    #    logging.error("SCHEDULER_TOKEN environment variable is not set")
-    #    return jsonify({"error": "Server configuration error"}), 500
-    #    
-    #auth_header = request.headers.get("Authorization")
-    #expected_auth = f"Bearer {scheduler_token}"
-    #
-    #if not auth_header or auth_header != expected_auth:
-    #    logging.warning("Unauthorized attempt to access category assortment analysis")
-    #    return jsonify({"error": "Unauthorized"}), 401
+@product_discovery_performance_bp.route("/api/admin/product-discovery-performance-analysis", methods=["GET"])
+def analyze_product_discovery_performance(current_user=""):
+    # Get project_id from request params if provided
+    project_id = request.args.get("project_id")
+    
+    # If project_id is not provided, require scheduler token authentication
+    if not project_id:
+        scheduler_token = os.environ.get("SCHEDULER_TOKEN")
+        if not scheduler_token:
+            logging.error("SCHEDULER_TOKEN environment variable is not set")
+            return jsonify({"error": "Server configuration error"}), 500
+            
+        auth_header = request.headers.get("Authorization")
+        expected_auth = f"Bearer {scheduler_token}"
         
+        if not auth_header or auth_header != expected_auth:
+            logging.warning("Unauthorized attempt to access category assortment analysis")
+            return jsonify({"error": "Unauthorized"}), 401
+    
+    #print(f"Starting product discovery performance analysis...")
+    master_project_id = "s360-demand-sensing"
+
     try:
-        # Get all client projects from Firestore
-        projects_ref = firestore_client.collection('client_projects')
-        projects = list(projects_ref.stream())
-        
-        results = []
-        log_rows_to_insert = []  # For BigQuery logging
-        analysis_timestamp = datetime.now()
-        
-        # Get the most recent date available for bestseller data
-        master_project_id = "s360-demand-sensing"
-        most_recent_date_query = f"""
-        SELECT MAX(date_month) as latest_date
-        FROM `{master_project_id}.ds_master_transformed_data.bestseller_monthly`
-        """
-        most_recent_job = bigquery_client.query(most_recent_date_query)
-        most_recent_results = list(most_recent_job.result())
-        
-        # Default to most recent date
-        most_recent_date = None
-        if most_recent_results and hasattr(most_recent_results[0], 'latest_date'):
-            most_recent_date = most_recent_results[0].latest_date.isoformat()
-        
-        # Create BigQuery dataset and table if they don't exist
+        dataset_ref = bigquery_client.dataset("project_performance", project=master_project_id)
+
+        # Check if table exists, create if it doesn't
+        bigquery_client.get_dataset(dataset_ref)
+        table_ref = bigquery_client.dataset("project_performance").table("product_discovery_performance")
+
         try:
-            # First, make sure the dataset exists
-            dataset_ref = bigquery_client.dataset("web_app_logs", project=master_project_id)
-            try:
-                bigquery_client.get_dataset(dataset_ref)
-            except NotFound:
-                # Create the dataset if it doesn't exist
-                dataset = bigquery.Dataset(dataset_ref)
-                dataset.location = "EU"  # Set your preferred location
-                bigquery_client.create_dataset(dataset)
-                
-            # Check if table exists, create if it doesn't
-            table_id = f"{master_project_id}.web_app_logs.category_assortment_analysis"
-            table_ref = bigquery_client.dataset("web_app_logs").table("category_assortment_analysis")
+            bigquery_client.get_table(table_ref)
+            print(f"Table {master_project_id}.project_performance.product_discovery_performance exists")
+        except NotFound:
+            print(f"Table {master_project_id}.project_performance.product_discovery_performance not found, creating...")
+            # Define updated schema with new fields
+            schema = [
+                bigquery.SchemaField("timestamp", "TIMESTAMP", mode="REQUIRED"),
+                bigquery.SchemaField("project_id", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("cloud_project_id", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("merchant_center_id", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("country_code_bs", "STRING", mode="REQUIRED"),
+                bigquery.SchemaField("category", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("bestseller_date", "DATE", mode="REQUIRED"),
+                bigquery.SchemaField("mc_products_date", "DATE", mode="REQUIRED"),
+                bigquery.SchemaField("is_top_category", "BOOLEAN", mode="NULLABLE"),
+                bigquery.SchemaField("products_in_assortment", "INTEGER", mode="NULLABLE"),
+                bigquery.SchemaField("products_in_stock", "INTEGER", mode="NULLABLE"),
+                bigquery.SchemaField("products_out_stock", "INTEGER", mode="NULLABLE"),
+                bigquery.SchemaField("total_products", "INTEGER", mode="NULLABLE"),
+                bigquery.SchemaField("share_percentage", "FLOAT", mode="NULLABLE"),
+                bigquery.SchemaField("backfill", "BOOLEAN", mode="REQUIRED")
+            ]
             
-            try:
-                bigquery_client.get_table(table_ref)
-            except NotFound:
-                # Define updated schema with new fields
-                schema = [
-                    bigquery.SchemaField("timestamp", "TIMESTAMP", mode="REQUIRED"),
-                    bigquery.SchemaField("merchant_center_date", "DATE", mode="REQUIRED"),
-                    bigquery.SchemaField("project_id", "STRING", mode="REQUIRED"),
-                    bigquery.SchemaField("project_name", "STRING", mode="REQUIRED"),
-                    bigquery.SchemaField("cloud_project_id", "STRING", mode="REQUIRED"),
-                    bigquery.SchemaField("merchant_center_id", "STRING", mode="REQUIRED"),
-                    bigquery.SchemaField("country_code", "STRING", mode="REQUIRED"),
-                    bigquery.SchemaField("category", "STRING", mode="NULLABLE"),
-                    bigquery.SchemaField("is_top_category", "BOOLEAN", mode="NULLABLE"),
-                    bigquery.SchemaField("products_in_assortment", "INTEGER", mode="NULLABLE"),
-                    bigquery.SchemaField("products_in_stock", "INTEGER", mode="NULLABLE"),
-                    bigquery.SchemaField("products_out_stock", "INTEGER", mode="NULLABLE"),
-                    bigquery.SchemaField("total_products", "INTEGER", mode="NULLABLE"),
-                    bigquery.SchemaField("share_percentage", "FLOAT", mode="NULLABLE"),
-                    bigquery.SchemaField("bestseller_date", "DATE", mode="NULLABLE")
-                ]
-                
-                table = bigquery.Table(table_ref, schema=schema)
-                table.time_partitioning = bigquery.TimePartitioning(
-                    type_=bigquery.TimePartitioningType.DAY,
-                    field="merchant_center_date"
-                )
-                table = bigquery_client.create_table(table)
-                print(f"Created table {table.project}.{table.dataset_id}.{table.table_id}")
-                
-        except Exception as table_error:
-            print(f"Error creating/checking BigQuery table: {str(table_error)}")
-            # Continue processing even if table creation fails
-        
-        for project_doc in projects:
-            project_data = project_doc.to_dict()
-            project_id = project_doc.id
-            cloud_project_id = project_data.get('cloudProjectId')
-            merchant_centers = project_data.get('merchantCenters', [])
+            table = bigquery.Table(table_ref, schema=schema)
+            table.time_partitioning = bigquery.TimePartitioning(
+                type_=bigquery.TimePartitioningType.DAY,
+                field="bestseller_date"
+            )
+            table.clustering_fields = ["project_id", "merchant_center_id", "country_code_bs"]
+            table = bigquery_client.create_table(table)
+            print(f"Created table {table.project}.{table.dataset_id}.{table.table_id}")
             
-            # Skip if no cloud project ID or merchant centers
-            if not cloud_project_id or not merchant_centers:
+    except Exception as table_error:
+        print(f"Error creating/checking BigQuery table: {str(table_error)}")
+        # Continue processing even if table creation fails
+    
+    projects_ref = firestore_client.collection('client_projects')
+    
+    # If project_id is provided, only process that project
+    if project_id:
+        project_doc = projects_ref.document(project_id).get()
+        if not project_doc.exists:
+            return jsonify({"error": f"Project with ID {project_id} not found"}), 404
+        projects = [project_doc]
+        print(f"Processing single project with ID: {project_id}")
+    else:
+        # Process all projects (scheduler mode)
+        projects = list(projects_ref.stream())
+        print(f"Processing all {len(projects)} projects (scheduler mode)")
+
+    all_results = []
+    processed_results = []
+
+    for project_doc in projects:
+        project_data = project_doc.to_dict()
+        project_id = project_doc.id
+        cloud_project_id = project_data.get('cloudProjectId')
+        merchant_centers = project_data.get('merchantCenters', [])
+
+        # Skip if no cloud project ID or merchant centers
+        if not cloud_project_id or not merchant_centers:
+            print(f"Skipping project {project_id}: missing cloud_project_id or merchant_centers")
+            continue
+
+        #print(f"Processing project {project_id} ({project_data.get('name', 'Unknown')})")
+        project_result = {
+            "project_id": project_id,
+            "project_name": project_data.get('name', 'Unknown'),
+            "cloud_project_id": cloud_project_id,
+            "merchant_centers": []
+        }
+
+        for mc in merchant_centers:
+            merchant_center_id = mc.get('merchantCenterId')
+            feed_label_country_code = mc.get('code', '').lower()
+            bestseller_country_code = mc.get('mappedMarket', feed_label_country_code).upper() if mc.get('mappedMarket') else feed_label_country_code.upper()
+            
+            if not merchant_center_id or not feed_label_country_code:
+                print(f"Skipping merchant center: missing merchantCenterId or code")
                 continue
                 
-            project_result = {
-                "project_id": project_id,
-                "project_name": project_data.get('name', 'Unknown'),
-                "cloud_project_id": cloud_project_id,
-                "merchant_centers": []
-            }
+            #print(f"Processing merchant center {merchant_center_id} for country {bestseller_country_code}")
+            project_result["merchant_centers"].append({
+                "merchant_center_id": merchant_center_id,
+                "feed_label_country_code": feed_label_country_code, # code from firestore
+                "bestseller_country_code": bestseller_country_code, # mappedMarket from firestore
+            })
             
-            # Process each merchant center
-            for merchant_center in merchant_centers:
-                merchant_center_id = merchant_center.get('merchantCenterId')
-                country_code = merchant_center.get('code')
+            # Get the latest date for which we've already processed data for this merchant center
+            try:
+                latest_processed_query = f"""
+                SELECT MAX(bestseller_date) as latest_date
+                FROM `{master_project_id}.project_performance.product_discovery_performance`
+                WHERE project_id = '{project_id}'
+                AND merchant_center_id = '{merchant_center_id}'
+                AND country_code_bs = '{bestseller_country_code}'
+                """
                 
-                if not merchant_center_id or not country_code:
-                    continue
+                latest_processed_job = bigquery_client.query(latest_processed_query)
+                latest_processed_result = latest_processed_job.result()
+                latest_processed_date = None
                 
-                try:
-                    # Use updated query to get categories with products in assortment
+                for row in latest_processed_result:
+                    latest_processed_date = row.latest_date
+                    break
+                
+                #print(f"Latest processed date for {merchant_center_id}: {latest_processed_date}")
+                
+                # Get available bestseller dates that need processing
+                bestseller_dates_query = f"""
+                SELECT DISTINCT date_month
+                FROM `s360-demand-sensing.ds_master_transformed_data.bestseller_monthly`
+                WHERE country_code = '{bestseller_country_code}'
+                """
+                
+                if latest_processed_date:
+                    bestseller_dates_query += f" AND date_month > '{latest_processed_date}'"
+                
+                bestseller_dates_query += " ORDER BY date_month"
+                
+                bestseller_dates_job = bigquery_client.query(bestseller_dates_query)
+                bestseller_dates_result = bestseller_dates_job.result()
+                
+                dates_to_process = []
+                for date_row in bestseller_dates_result:
+                    dates_to_process.append(date_row.date_month)
+                
+                #print(f"Found {len(dates_to_process)} bestseller dates to process for {merchant_center_id}")
+                
+                for bestseller_date in dates_to_process:
+                    #print(f"Processing date {bestseller_date} for {merchant_center_id}")
                     
-                    # Add date filter matching what frontend uses - this is crucial for matching counts
-                    date_filter = most_recent_date if most_recent_date else "CURRENT_DATE()"
-                    
-                    query = f"""
-                    WITH products AS (
-                      SELECT DISTINCT
-                        offer_id,
-                        product_id,
-                        availability
-                      FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
-                      WHERE _PARTITIONTIME = (
-                              SELECT MAX(_PARTITIONTIME)
-                              FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
-                            )
-                        AND channel    = 'online'
-                        AND feed_label = '{country_code}'
-                    ),
-
-                    bestseller_main AS (
-                      SELECT
-                        category,
-                        entity_id
-                      FROM `s360-demand-sensing.ds_master_transformed_data.bestseller_monthly`
-                      WHERE country_code = '{country_code}'
-                        AND date_month   = '{date_filter}'
-                    ),
-
-                    total_bestseller_counts AS (
-                      SELECT
-                        category,
-                        COUNT(entity_id) AS total_products
-                      FROM bestseller_main
-                      WHERE category IS NOT NULL
-                      GROUP BY category
-                    ),
-
-                    mapping AS (
-                      SELECT DISTINCT
-                        m.entity_id,
-                        m.product_id,
-                        bm.category
-                      FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}` AS m
-                      LEFT JOIN bestseller_main AS bm
-                        ON bm.entity_id = m.entity_id
-                    ),
-
-                    final AS (
-                      SELECT
-                        m.entity_id,
-                        m.category,
-                        p.availability
-                      FROM products AS p
-                      LEFT JOIN mapping AS m
-                        ON p.product_id = m.product_id
-                      WHERE m.category IS NOT NULL            -- drop unmatched rows
-                    ),
-
-                    entity_status AS (
-                      SELECT
-                        category,
-                        entity_id,
-                        LOGICAL_OR(availability = 'in stock')     AS has_in_stock,
-                        LOGICAL_OR(availability = 'out of stock') AS any_out_stock
-                      FROM final
-                      GROUP BY category, entity_id
-                    ),
-
-                    category_counts AS (
-                      SELECT
-                        e.category                         AS level_1,
-                        COUNT(*)                           AS products_in_assortment,
-                        COUNTIF(has_in_stock)              AS products_in_stock,
-                        COUNTIF(NOT has_in_stock
-                                AND any_out_stock)         AS products_out_stock,
-                        t.total_products,
-                        SAFE_DIVIDE(COUNT(*), t.total_products) AS share_of_total
-                      FROM entity_status e
-                      JOIN total_bestseller_counts t
-                        ON e.category = t.category
-                      GROUP BY e.category, t.total_products
-                      ORDER BY products_in_assortment DESC
-                    )
-
-                    SELECT *
-                    FROM category_counts
+                    # Get latest Products data date for this merchant center
+                    products_date_query = f"""
+                    SELECT MAX(_PARTITIONTIME) as latest_date
+                    FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
                     """
                     
-                    # Execute the query
-                    query_job = bigquery_client.query(query)
-                    results_rows = list(query_job.result())
+                    products_date_job = bigquery_client.query(products_date_query)
+                    products_date_result = products_date_job.result()
+                    products_date = None
                     
-                    # If there are categories with products in assortment
-                    if results_rows:
-                        # Find top category for summary
-                        top_category = results_rows[0].level_1
-                        top_products_in_assortment = results_rows[0].products_in_assortment
-                        top_products_in_stock = results_rows[0].products_in_stock
-                        top_products_out_stock = results_rows[0].products_out_stock
-                        top_total_products = results_rows[0].total_products
-                        top_share_percentage = round(results_rows[0].share_of_total * 100, 2) if results_rows[0].share_of_total else 0
-                        
-                        # Add merchant center summary to result (using top category for summary)
-                        merchant_result = {
-                            "merchant_center_id": merchant_center_id,
-                            "country_code": country_code,
-                            "top_category": top_category,
-                            "products_in_assortment": top_products_in_assortment,
-                            "products_in_stock": top_products_in_stock,
-                            "products_out_stock": top_products_out_stock,
-                            "total_products": top_total_products,
-                            "share_of_total": top_share_percentage,
-                            "date_used": most_recent_date,
-                            "categories_count": len(results_rows)
-                        }
-                        
-                        # Process all categories
-                        for row in results_rows:
-                            category = row.level_1
-                            products_in_assortment = row.products_in_assortment
-                            products_in_stock = row.products_in_stock
-                            products_out_stock = row.products_out_stock
-                            total_products = row.total_products
-                            share_of_total = row.share_of_total
-                            share_percentage = round(share_of_total * 100, 2) if share_of_total else 0
-                            
-                            # Prepare data for BigQuery insert for this category
-                            bq_row = {
-                                "timestamp": analysis_timestamp.strftime('%Y-%m-%d %H:%M:%S'),
-                                "merchant_center_date": analysis_timestamp.strftime('%Y-%m-%d'),
-                                "project_id": project_id,
-                                "project_name": project_data.get('name', 'Unknown'),
-                                "cloud_project_id": cloud_project_id,
-                                "merchant_center_id": merchant_center_id,
-                                "country_code": country_code,
-                                "category": category,
-                                "is_top_category": (category == top_category),
-                                "products_in_assortment": products_in_assortment,
-                                "products_in_stock": products_in_stock,
-                                "products_out_stock": products_out_stock,
-                                "total_products": total_products,
-                                "share_percentage": share_percentage,
-                                "bestseller_date": most_recent_date
-                            }
-                            log_rows_to_insert.append(bq_row)
+                    for row in products_date_result:
+                        products_date = row.latest_date
+                        break
+                    
+                    if not products_date:
+                        print(f"No products data found for {merchant_center_id}")
+                        continue
+                    
+                    # Get the first day of the bestseller month to check for backfill
+                    bestseller_month_first_day = None
+                    if hasattr(bestseller_date, 'year') and hasattr(bestseller_date, 'month'):
+                        # Bestseller date is already a date object
+                        bestseller_month_first_day = datetime(bestseller_date.year, bestseller_date.month, 1).date()
                     else:
-                        # No categories with products in assortment
-                        merchant_result = {
-                            "merchant_center_id": merchant_center_id,
-                            "country_code": country_code,
-                            "top_category": None,
-                            "products_in_assortment": 0,
-                            "products_in_stock": 0,
-                            "products_out_stock": 0,
-                            "total_products": 0,
-                            "share_of_total": 0,
-                            "date_used": most_recent_date,
-                            "categories_count": 0
-                        }
+                        # Try to parse the bestseller_date if it's a string
+                        try:
+                            parsed_date = datetime.strptime(str(bestseller_date), '%Y-%m-%d').date()
+                            bestseller_month_first_day = datetime(parsed_date.year, parsed_date.month, 1).date()
+                        except Exception as e:
+                            print(f"Unable to parse bestseller_date {bestseller_date} to determine month's first day: {str(e)}")
                     
-                    project_result["merchant_centers"].append(merchant_result)
+                    # Check if we have product data for the first day of bestseller month
+                    first_day_data_exists = False
+                    backfill = True
                     
-                except Exception as mc_error:
-                    # Log error but continue with next merchant center
-                    print(f"Error processing merchant center {merchant_center_id}: {str(mc_error)}")
-                    merchant_result = {
-                        "merchant_center_id": merchant_center_id,
-                        "country_code": country_code,
-                        "error": str(mc_error)
-                    }
-                    project_result["merchant_centers"].append(merchant_result)
-            
-            # Only add project to results if at least one merchant center was processed
-            if project_result["merchant_centers"]:
-                results.append(project_result)
-        
-        # Insert data into BigQuery
-        if log_rows_to_insert:
-            try:
-                table_id = f"{master_project_id}.web_app_logs.category_assortment_analysis"
-                errors = bigquery_client.insert_rows_json(table_id, log_rows_to_insert)
-                if errors:
-                    print(f"Encountered errors while inserting rows: {errors}")
-                else:
-                    print(f"Successfully inserted {len(log_rows_to_insert)} rows into {table_id}")
-            except Exception as insert_error:
-                print(f"Error inserting data into BigQuery: {str(insert_error)}")
-        
-        # Return the analysis results
-        return jsonify({
-            "success": True,
-            "timestamp": analysis_timestamp.isoformat(),
-            "date_used_for_filtering": most_recent_date,
-            "results": results,
-            "logged_categories_count": len(log_rows_to_insert),
-            "logged_to_bigquery": len(log_rows_to_insert) > 0
-        })
-        
-    except Exception as e:
-        print(f"Error analyzing category assortment: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": f"Failed to analyze category assortment: {str(e)}"
-        }), 500
+                    if bestseller_month_first_day:
+                        first_day_check_query = f"""
+                        SELECT COUNT(*) as count
+                        FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
+                        WHERE _PARTITIONTIME = '{bestseller_month_first_day}'
+                        """
+                        
+                        first_day_check_job = bigquery_client.query(first_day_check_query)
+                        first_day_check_result = first_day_check_job.result()
+                        
+                        for row in first_day_check_result:
+                            if row.count > 0:
+                                first_day_data_exists = True
+                                break
+                    
+                    # If we have data for the first day of the month, use that instead of the latest
+                    if first_day_data_exists:
+                        products_date = bestseller_month_first_day
+                        backfill = False
+                        #print(f"Using first day of bestseller month data ({products_date}) for {merchant_center_id}")
+                    #else:
+                    #    print(f"Using latest products data ({products_date}) for {merchant_center_id} (backfill=True)")
+                    
+                    # Run the main query to get category performance data
+                    query = f"""
+                    WITH products AS (
+                      SELECT
+                        m.entity_id,
+                        MAX(CASE WHEN p.availability = 'in stock' THEN 1 ELSE 0 END) AS in_stock,
+                        CASE
+                          WHEN MAX(CASE WHEN p.availability = 'in stock' THEN 1 ELSE 0 END) = 0
+                          THEN 1 ELSE 0
+                        END AS out_of_stock,
+                        1 AS in_assortment
+                      FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}` p
+                      INNER JOIN `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}` m
+                            ON LOWER(p.product_id) = LOWER(m.product_id)
+                      WHERE p._PARTITIONTIME = '{products_date}'
+                        AND channel = 'online'
+                        AND LOWER(feed_label) = '{feed_label_country_code}'
+                      GROUP BY m.entity_id
+                    ),
+                    bestseller_main AS (
+                      SELECT DISTINCT
+                        entity_id,
+                        category
+                      FROM `s360-demand-sensing.ds_master_transformed_data.bestseller_monthly`
+                      WHERE date_month = '{bestseller_date}' 
+                        AND country_code = '{bestseller_country_code}' 
+                    ),
+                    merge_data AS (
+                      SELECT
+                        b.category,
+                        SUM(IFNULL(p.in_stock, 0)) AS in_stock_count,
+                        SUM(IFNULL(p.out_of_stock, 0)) AS out_of_stock_count,
+                        SUM(IFNULL(p.in_assortment, 0)) AS in_assortment_count,
+                        COUNT(*) AS total_product_count
+                      FROM bestseller_main b
+                      LEFT JOIN products p USING (entity_id)
+                      GROUP BY b.category
+                    )
+                    SELECT *
+                    FROM merge_data
+                    """
+                    #print(query)
+                    try:
+                        #print(f"Executing query for {merchant_center_id}, date {bestseller_date}")
+                        # Execute query
+                        category_performance_job = bigquery_client.query(query)
+                        category_performance_results = category_performance_job.result()
+                        
+                        # Process results and identify top category
+                        category_results = []
+                        top_category = None
+                        max_in_assortment = -1
+                        
+                        row_count = 0
+                        for row in category_performance_results:
+                            row_count += 1
+                            if not row.category:
+                                #print(f"Skipping row with null category")
+                                continue
+                                
+                            if row.total_product_count <= 0:
+                                #print(f"Skipping category {row.category} with zero or negative total_product_count")
+                                continue
+                            
+                            # Safety check for None values
+                            in_stock_count = 0 if row.in_stock_count is None else row.in_stock_count
+                            out_of_stock_count = 0 if row.out_of_stock_count is None else row.out_of_stock_count
+                            in_assortment_count = 0 if row.in_assortment_count is None else row.in_assortment_count
+                            total_product_count = row.total_product_count
+                            
+                            # Calculate share percentage with safety check
+                            share_percentage = 0
+                            if total_product_count > 0 and in_assortment_count is not None:
+                                share_percentage = in_assortment_count / total_product_count
+                            
+                            category_result = {
+                                "category": row.category,
+                                "products_in_stock": in_stock_count,
+                                "products_out_stock": out_of_stock_count,
+                                "products_in_assortment": in_assortment_count,
+                                "total_products": total_product_count,
+                                "share_percentage": share_percentage
+                            }
+                            
+                            category_results.append(category_result)
+                            
+                            # Update top category if this one has more products in assortment
+                            if in_assortment_count > max_in_assortment:
+                                max_in_assortment = in_assortment_count
+                                top_category = row.category
+                        
+                        #print(f"Processed {row_count} rows, found {len(category_results)} valid categories for {merchant_center_id}")
+                        
+                        # Insert results into BigQuery
+                        if category_results:
+                            rows_to_insert = []
+                            current_timestamp = datetime.now()
+                            
+                            for category_result in category_results:
+                                is_top = category_result["category"] == top_category
+                                
+                                # Convert datetime objects to ISO format strings for JSON serialization
+                                formatted_timestamp = current_timestamp.isoformat()
+                                
+                                # Format date fields as YYYY-MM-DD for BigQuery DATE type
+                                if hasattr(bestseller_date, 'strftime'):
+                                    formatted_bestseller_date = bestseller_date.strftime('%Y-%m-%d')
+                                else:
+                                    # Handle if it's already a string or other format
+                                    formatted_bestseller_date = str(bestseller_date)
+                                
+                                if hasattr(products_date, 'strftime'):
+                                    formatted_products_date = products_date.strftime('%Y-%m-%d')
+                                else:
+                                    # Handle if it's already a string or other format
+                                    formatted_products_date = str(products_date)
+                            
+                                row = {
+                                    "timestamp": formatted_timestamp,
+                                    "project_id": project_id,
+                                    "cloud_project_id": cloud_project_id,
+                                    "merchant_center_id": merchant_center_id,
+                                    "country_code_bs": bestseller_country_code,
+                                    "category": category_result["category"],
+                                    "bestseller_date": formatted_bestseller_date,
+                                    "mc_products_date": formatted_products_date,
+                                    "backfill": backfill,
+                                    "is_top_category": is_top,
+                                    "products_in_assortment": category_result["products_in_assortment"],
+                                    "products_in_stock": category_result["products_in_stock"],
+                                    "products_out_stock": category_result["products_out_stock"],
+                                    "total_products": category_result["total_products"],
+                                    "share_percentage": category_result["share_percentage"]
+                                }
+                                
+                                rows_to_insert.append(row)
+                            
+                            # Insert rows
+                            if rows_to_insert:
+                                #print(f"Inserting {len(rows_to_insert)} rows for {merchant_center_id}, date {bestseller_date}")
+                                insert_errors = bigquery_client.insert_rows_json(
+                                    f"{master_project_id}.project_performance.product_discovery_performance",
+                                    rows_to_insert
+                                )
+                                
+                                if insert_errors:
+                                    print(f"Errors inserting rows for {merchant_center_id}: {insert_errors}")
+                                else:
+                                    #print(f"Successfully inserted {len(rows_to_insert)} rows for {merchant_center_id}")
+                                    processed_date_info = {
+                                        "project_id": project_id,
+                                        "merchant_center_id": merchant_center_id,
+                                        "bestseller_country_code": bestseller_country_code,
+                                        "bestseller_date": bestseller_date.strftime('%Y-%m-%d') if hasattr(bestseller_date, 'strftime') else str(bestseller_date),
+                                        "categories_processed": len(category_results),
+                                        "top_category": top_category
+                                    }
+                                    processed_results.append(processed_date_info)
+                                
+                    except Exception as query_error:
+                        error_msg = f"Error processing data for project {project_id}, merchant center {merchant_center_id}, date {bestseller_date}: {str(query_error)}"
+                        print(error_msg)
+                        traceback.print_exc()  # Print the full stack trace for better debugging
+                
+            except Exception as mc_error:
+                error_msg = f"Error processing merchant center {merchant_center_id}: {str(mc_error)}"
+                print(error_msg)
+                traceback.print_exc()  # Print the full stack trace for better debugging
+
+        all_results.append(project_result)
+
+    print(f"Analysis complete. Processed {len(processed_results)} dates across all merchant centers")
+    return jsonify({
+        "projects": all_results,
+        "processed_data": processed_results
+    })
 
 
 

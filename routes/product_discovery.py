@@ -3,6 +3,7 @@ from utils.imports import *
 from utils.config import *
 from utils.decorators import *
 from urllib.parse import quote
+import traceback
 
 # Create the auth blueprint
 product_discovery_bp = Blueprint('product_discovery', __name__)
@@ -178,9 +179,17 @@ def get_popular_products(current_user, cloud_project_id = None):
                     ),
                     mapping AS (
                       SELECT DISTINCT
-                        m.entity_id,
-                        m.product_id
-                      FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}` AS m
+                        entity_id,
+                        product_id
+                      FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}`
+                    ),
+                    entity_assortment AS (
+                      SELECT 
+                        mapping.entity_id,
+                        MAX(CASE WHEN products.product_id IS NOT NULL THEN 1 ELSE 0 END) AS in_assortment
+                      FROM mapping
+                      LEFT JOIN products ON mapping.product_id = products.product_id
+                      GROUP BY mapping.entity_id
                     ),
                     final_data AS (
                       SELECT DISTINCT
@@ -196,15 +205,9 @@ def get_popular_products(current_user, cloud_project_id = None):
                          WHERE entity_id = months_data.entity_id 
                          AND {date_filter_clause}) AS date_month,
                         months_data.avg_rank,
-                        CASE 
-                          WHEN products.product_id IS NOT NULL THEN 1
-                          ELSE 0
-                        END AS in_assortment
+                        COALESCE(entity_assortment.in_assortment, 0) AS in_assortment
                       FROM months_data
-                      LEFT JOIN mapping 
-                      ON months_data.entity_id = mapping.entity_id
-                      LEFT JOIN products 
-                      ON mapping.product_id = products.product_id
+                      LEFT JOIN entity_assortment ON months_data.entity_id = entity_assortment.entity_id
                     )
                     """
                 else:
@@ -242,9 +245,17 @@ def get_popular_products(current_user, cloud_project_id = None):
                     ),
                     mapping AS (
                       SELECT DISTINCT
-                        m.entity_id,
-                        m.product_id
-                      FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}` AS m
+                        entity_id,
+                        product_id
+                      FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}`
+                    ),
+                    entity_assortment AS (
+                      SELECT 
+                        mapping.entity_id,
+                        MAX(CASE WHEN products.product_id IS NOT NULL THEN 1 ELSE 0 END) AS in_assortment
+                      FROM mapping
+                      LEFT JOIN products ON mapping.product_id = products.product_id
+                      GROUP BY mapping.entity_id
                     ),
                     final_data AS (
                       SELECT
@@ -260,15 +271,9 @@ def get_popular_products(current_user, cloud_project_id = None):
                          WHERE entity_id = months_data.entity_id 
                          AND {date_filter_clause}) AS date_month,
                         months_data.avg_rank,
-                        CASE 
-                          WHEN products.product_id IS NOT NULL THEN 1
-                          ELSE 0
-                        END AS in_assortment
+                        COALESCE(entity_assortment.in_assortment, 0) AS in_assortment
                       FROM months_data
-                      LEFT JOIN mapping 
-                      ON months_data.entity_id = mapping.entity_id
-                      LEFT JOIN products 
-                      ON mapping.product_id = products.product_id
+                      LEFT JOIN entity_assortment ON months_data.entity_id = entity_assortment.entity_id
                     )
                     """
             else:
@@ -306,9 +311,17 @@ def get_popular_products(current_user, cloud_project_id = None):
                 ),
                 mapping AS (
                   SELECT DISTINCT
-                    m.entity_id,
-                    m.product_id
-                  FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}` AS m
+                    entity_id,
+                    product_id
+                  FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}`
+                ),
+                entity_assortment AS (
+                  SELECT 
+                    mapping.entity_id,
+                    MAX(CASE WHEN products.product_id IS NOT NULL THEN 1 ELSE 0 END) AS in_assortment
+                  FROM mapping
+                  LEFT JOIN products ON mapping.product_id = products.product_id
+                  GROUP BY mapping.entity_id
                 ),
                 final_data AS (
                   SELECT DISTINCT
@@ -322,15 +335,9 @@ def get_popular_products(current_user, cloud_project_id = None):
                     main_bestseller.brand,
                     main_bestseller.date_month,
                     main_bestseller.avg_rank,
-                    CASE 
-                      WHEN products.product_id IS NOT NULL THEN 1
-                      ELSE 0
-                    END AS in_assortment
+                    COALESCE(entity_assortment.in_assortment, 0) AS in_assortment
                   FROM main_bestseller
-                  LEFT JOIN mapping 
-                  ON main_bestseller.entity_id = mapping.entity_id
-                  LEFT JOIN products 
-                  ON mapping.product_id = products.product_id
+                  LEFT JOIN entity_assortment ON main_bestseller.entity_id = entity_assortment.entity_id
                 )
                 """
 
@@ -393,23 +400,25 @@ def get_popular_products(current_user, cloud_project_id = None):
                     ),
                     mapping AS (
                       SELECT DISTINCT
-                        m.entity_id,
-                        m.product_id
-                      FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}` AS m
+                        entity_id,
+                        product_id
+                      FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}`
+                    ),
+                    entity_assortment AS (
+                      SELECT 
+                        mapping.entity_id,
+                        MAX(CASE WHEN products.product_id IS NOT NULL THEN 1 ELSE 0 END) AS in_assortment
+                      FROM mapping
+                      LEFT JOIN products ON mapping.product_id = products.product_id
+                      GROUP BY mapping.entity_id
                     ),
                     final_count AS (
                       SELECT
                         months_count.entity_id,
                         months_count.brand,
-                        CASE 
-                          WHEN products.product_id IS NOT NULL THEN 1
-                          ELSE 0
-                        END AS in_assortment
+                        COALESCE(entity_assortment.in_assortment, 0) AS in_assortment
                       FROM months_count
-                      LEFT JOIN mapping 
-                      ON months_count.entity_id = mapping.entity_id
-                      LEFT JOIN products 
-                      ON mapping.product_id = products.product_id
+                      LEFT JOIN entity_assortment ON months_count.entity_id = entity_assortment.entity_id
                     )
                     """
                 else:
@@ -441,23 +450,25 @@ def get_popular_products(current_user, cloud_project_id = None):
                     ),
                     mapping AS (
                       SELECT DISTINCT
-                        m.entity_id,
-                        m.product_id
-                      FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}` AS m
+                        entity_id,
+                        product_id
+                      FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}`
+                    ),
+                    entity_assortment AS (
+                      SELECT 
+                        mapping.entity_id,
+                        MAX(CASE WHEN products.product_id IS NOT NULL THEN 1 ELSE 0 END) AS in_assortment
+                      FROM mapping
+                      LEFT JOIN products ON mapping.product_id = products.product_id
+                      GROUP BY mapping.entity_id
                     ),
                     final_count AS (
                       SELECT
                         months_count.entity_id,
                         months_count.brand,
-                        CASE 
-                          WHEN products.product_id IS NOT NULL THEN 1
-                          ELSE 0
-                        END AS in_assortment
+                        COALESCE(entity_assortment.in_assortment, 0) AS in_assortment
                       FROM months_count
-                      LEFT JOIN mapping 
-                      ON months_count.entity_id = mapping.entity_id
-                      LEFT JOIN products 
-                      ON mapping.product_id = products.product_id
+                      LEFT JOIN entity_assortment ON months_count.entity_id = entity_assortment.entity_id
                     )
                     """
             else:
@@ -490,23 +501,25 @@ def get_popular_products(current_user, cloud_project_id = None):
                 ),
                 mapping AS (
                   SELECT DISTINCT
-                    m.entity_id,
-                    m.product_id
-                  FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}` AS m
+                    entity_id,
+                    product_id
+                  FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}`
+                ),
+                entity_assortment AS (
+                  SELECT 
+                    mapping.entity_id,
+                    MAX(CASE WHEN products.product_id IS NOT NULL THEN 1 ELSE 0 END) AS in_assortment
+                  FROM mapping
+                  LEFT JOIN products ON mapping.product_id = products.product_id
+                  GROUP BY mapping.entity_id
                 ),
                 final_count AS (
                   SELECT
                     main_bestseller.entity_id,
                     main_bestseller.brand,
-                    CASE 
-                      WHEN products.product_id IS NOT NULL THEN 1
-                      ELSE 0
-                    END AS in_assortment
+                    COALESCE(entity_assortment.in_assortment, 0) AS in_assortment
                   FROM main_bestseller
-                  LEFT JOIN mapping 
-                  ON main_bestseller.entity_id = mapping.entity_id
-                  LEFT JOIN products 
-                  ON mapping.product_id = products.product_id
+                  LEFT JOIN entity_assortment ON main_bestseller.entity_id = entity_assortment.entity_id
                 )
                 """
 
@@ -568,7 +581,6 @@ def get_popular_products(current_user, cloud_project_id = None):
                 unique_brands_count = row.unique_brands_count
                 break  # Only need the first row
 
-
         return jsonify({
             "products": products, 
             "count": len(products),
@@ -586,262 +598,6 @@ def get_popular_products(current_user, cloud_project_id = None):
         print(f"Error querying BigQuery: {str(e)}")
         return jsonify({"error": f"Failed to fetch popular products: {str(e)}"}), 500 
 
-@product_discovery_bp.route("/api/categories", methods=["GET"])
-@token_required
-@project_access_required
-def get_categories(current_user, cloud_project_id=None):
-    try:
-        # Get request parameters
-        country = request.args.get('country')  # Keep for backward compatibility
-        merchant_center_id = request.args.get('merchant_center_id')
-        
-        # Get new parameters for mapped market and original code
-        mapped_market = request.args.get('mapped_market')  # For bestseller filtering
-        original_code = request.args.get('original_code')  # For products filtering
-
-        # Get date parameters if they exist (for bestseller filtering)
-        date_filter = request.args.get('date', None)
-        dates = request.args.getlist('dates[]')  # Get multiple dates as array
-
-        # Get project_id parameter
-        master_project_id = "s360-demand-sensing"
-
-        # If we have cloud_project_id and merchant_center_id, use the enhanced query
-        if cloud_project_id and merchant_center_id:
-            # Build date filter clause for bestseller data
-            date_filter_clause = ""
-            if dates and len(dates) > 0:
-                date_strings = [f"'{date}'" for date in dates]
-                date_filter_clause = f"AND date_month IN ({', '.join(date_strings)})"
-            elif date_filter:
-                date_filter_clause = f"AND date_month = '{date_filter}'"
-            
-            # Build country filter clause for bestseller data - use mapped_market if available
-            country_filter_clause = ""
-            if mapped_market:
-                country_filter_clause = f"AND country_code = '{mapped_market}'"
-
-            elif country:
-                country_filter_clause = f"AND country_code = '{country}'"
-
-            
-            # Determine which country code to use for products filtering - use original_code if available
-            products_country_code = original_code if original_code else (country if country else "")
-            
-            if not products_country_code:
-                return jsonify({"error": "Missing country parameter"}), 400
-
-            query = f"""
-            WITH products AS (
-              SELECT DISTINCT
-                offer_id,
-                product_id
-              FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`
-              WHERE _PARTITIONTIME = (SELECT MAX(_PARTITIONTIME) FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`)
-              AND channel = 'online'
-              AND LOWER(feed_label) = '{products_country_code.lower()}'
-            ),
-
-            bestseller_main AS (
-              SELECT DISTINCT
-                category,
-                entity_id,
-                title
-              FROM `{master_project_id}.ds_master_transformed_data.bestseller_monthly`
-              WHERE 1=1 {date_filter_clause} {country_filter_clause}
-            ),
-
-            mapping AS (
-              SELECT DISTINCT
-                m.entity_id,
-                m.product_id,
-                bm.category,
-                bm.title
-              FROM `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}` AS m
-              LEFT JOIN bestseller_main AS bm
-              ON bm.entity_id = m.entity_id
-            ),
-
-            final AS (
-              SELECT
-                m.entity_id,
-                m.category,
-                m.title,
-                CASE WHEN p.product_id IS NOT NULL THEN 1 ELSE 0 END AS in_assortment
-              FROM mapping AS m
-              LEFT JOIN products AS p
-              ON m.product_id = p.product_id
-              WHERE m.entity_id IS NOT NULL
-            ),
-            
-            category_counts AS (
-              SELECT
-                category AS level_1,
-                COUNT(DISTINCT entity_id) AS total_entities,
-                COUNT(DISTINCT title) AS total_products,
-                SUM(CASE WHEN in_assortment = 1 THEN 1 ELSE 0 END) AS in_assortment_entity_count,
-                COUNT(DISTINCT CASE WHEN in_assortment = 1 THEN title ELSE NULL END) AS in_assortment_count
-              FROM final
-              WHERE category IS NOT NULL
-              GROUP BY 1
-              ORDER BY 2 DESC
-            )
-            
-            SELECT DISTINCT
-                t.google_cat_id,
-                t.level_1,
-                COALESCE(c.total_products, 0) AS total_products,
-                COALESCE(c.in_assortment_count, 0) AS in_assortment_count,
-                COALESCE(c.total_entities, 0) AS total_entities,
-                COALESCE(c.in_assortment_entity_count, 0) AS in_assortment_entity_count
-            FROM `{master_project_id}.ds_master_transformed_data.google_taxonomy` AS t
-            LEFT JOIN category_counts AS c
-            ON t.level_1 = c.level_1
-            ORDER BY total_products DESC, t.level_1 ASC
-            """
-        else:
-            # Fallback to original query if missing cloud_project_id or merchant_center_id
-            query = f"""
-            SELECT 
-                google_cat_id, 
-                level_1,
-                0 AS total_products,
-                0 AS in_assortment_count,
-                0 AS total_entities,
-                0 AS in_assortment_entity_count
-            FROM `{master_project_id}.ds_master_transformed_data.google_taxonomy`
-            """
-        
-        # Execute the query
-        query_job = bigquery_client.query(query)
-        results = query_job.result()
-        
-        # Convert to dictionary for easy lookup of id->name
-        categories = {}
-        # Create dictionaries to store category counts
-        category_counts = {}
-        category_in_assortment_counts = {}
-        
-        # Add new dictionaries for entity counts
-        category_entity_counts = {}
-        category_in_assortment_entity_counts = {}
-        
-        for row in results:
-            # Store keys as integers instead of strings
-            categories[row.google_cat_id] = row.level_1
-            
-            # Store the total count for each category name
-            if row.level_1 not in category_counts or (row.total_products > category_counts[row.level_1]):
-                category_counts[row.level_1] = row.total_products
-            
-            # Store the in_assortment count for each category
-            if row.level_1 not in category_in_assortment_counts or (row.in_assortment_count > category_in_assortment_counts[row.level_1]):
-                category_in_assortment_counts[row.level_1] = row.in_assortment_count
-                
-            # Store entity counts for comparison
-            if row.level_1 not in category_entity_counts or (row.total_entities > category_entity_counts[row.level_1]):
-                category_entity_counts[row.level_1] = row.total_entities
-                
-            if row.level_1 not in category_in_assortment_entity_counts or (row.in_assortment_entity_count > category_in_assortment_entity_counts[row.level_1]):
-                category_in_assortment_entity_counts[row.level_1] = row.in_assortment_entity_count
-        
-        # Create a list of unique level_1 category names for filtering
-        distinct_categories = list(set(categories.values()))
-        # Sort by product count descending, then alphabetically
-        distinct_categories.sort(key=lambda x: (-category_counts.get(x, 0), x))
-        
-        # Group category IDs by level_1 name
-        categories_grouped = {}
-        for cat_id, level_1 in categories.items():
-            if level_1 not in categories_grouped:
-                categories_grouped[level_1] = []
-            categories_grouped[level_1].append(cat_id)
-
-        return jsonify({
-            "categories": categories,
-            "distinct_categories": distinct_categories,
-            "categories_grouped": categories_grouped,
-            "category_counts": category_counts,
-            "category_in_assortment_counts": category_in_assortment_counts,
-            "category_entity_counts": category_entity_counts,
-            "category_in_assortment_entity_counts": category_in_assortment_entity_counts
-        })
-    except Exception as e:
-        print(f"Error fetching categories: {str(e)}")
-        return jsonify({"error": f"Failed to fetch categories: {str(e)}"}), 500 
-
-@product_discovery_bp.route("/api/complete_category_hierarchy", methods=["GET"])
-@token_required
-@project_access_required
-def get_complete_category_hierarchy(current_user, cloud_project_id=None):
-    """Get a complete hierarchical structure of all categories"""
-    try:
-        # Get project ID
-        project_id = request.args.get('project_id')
-        if not project_id:
-            return jsonify({"error": "Missing project_id parameter"}), 400
-            
-        # Get merchant center ID
-        merchant_center_id = None
-        
-        # Try to find a merchant center from the project
-        project_ref = firestore_client.collection('client_projects').document(project_id)
-        project_doc = project_ref.get()
-        
-        if project_doc.exists:
-            project_data = project_doc.to_dict()
-            if project_data and project_data.get('merchantCenters') and len(project_data['merchantCenters']) > 0:
-                # Get first merchant center ID available
-                merchant_center_id = project_data['merchantCenters'][0].get('merchantCenterId')
-        
-        # Build the query to get the complete hierarchy
-        master_project_id = "s360-demand-sensing"
-        
-        # Use the merchant center ID if available
-        if cloud_project_id and merchant_center_id:
-            query = f"""
-            SELECT 
-            level_1,
-            level_2,
-            level_3
-            FROM `s360-demand-sensing.ds_master_transformed_data.google_taxonomy` 
-            """
-            
-        # Execute the query
-        query_job = bigquery_client.query(query)
-        results = query_job.result()
-        
-        # Build the hierarchical structure
-        hierarchy = {}
-        
-        for row in results:
-            level_1 = row.level_1
-            level_2 = row.level_2
-            level_3 = row.level_3
-            
-            # Add level 1 if not exists
-            if level_1 not in hierarchy:
-                hierarchy[level_1] = {}
-                
-            # Add level 2 if it exists and not already added
-            if level_2 and level_2 not in hierarchy[level_1]:
-                hierarchy[level_1][level_2] = {}
-                
-            # Add level 3 if it exists
-            if level_2 and level_3:
-                hierarchy[level_1][level_2][level_3] = True
-        
-        return jsonify({
-            "success": True,
-            "hierarchy": hierarchy
-        })
-        
-    except Exception as e:
-        print(f"Error fetching complete category hierarchy: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": f"Failed to fetch complete category hierarchy: {str(e)}"
-        }), 500
 
 @product_discovery_bp.route("/api/brands", methods=["GET"])
 @token_required
@@ -1240,22 +996,66 @@ def get_user_lists(current_user):
         shared_lists = list(lists_ref.where('shared_with', 'array_contains', current_user).where('project_id', '==', project_id).stream())
         
         # Combine lists
-        all_lists = []
-        for list_doc in owner_lists + shared_lists:
-            list_data = list_doc.to_dict()
-            list_data['id'] = list_doc.id
-            list_data['is_owner'] = list_data.get('owner') == current_user
-            all_lists.append(list_data)
+        all_lists = owned_lists + shared_lists
+        
+        # Get connection to PostgreSQL
+        conn = get_db_connection()
+        
+        # Build result with all lists and their items
+        result = {
+            "lists": [],
+            "itemsMap": {}
+        }
+        
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+                for list_doc in all_lists:
+                    list_data = list_doc.to_dict()
+                    list_id = list_doc.id
+                    
+                    # Add list metadata to result
+                    list_meta = {
+                        "id": list_id,
+                        "name": list_data.get("name"),
+                        "description": list_data.get("description", ""),
+                        "project_id": list_data.get("project_id"),
+                        "country_code": list_data.get("country_code"),
+                        "owner": list_data.get("owner"),
+                        "shared_with": list_data.get("shared_with", []),
+                        "is_owner": list_data.get("owner") == current_user
+                    }
+                    result["lists"].append(list_meta)
+                    
+                    # Get items for this list
+                    cursor.execute(
+                        "SELECT entity_id FROM user_lists WHERE list_id = %s",
+                        (list_id,)
+                    )
+                    items = cursor.fetchall()
+                    
+                    # For each item, add this list to its entry in the map
+                    for item in items:
+                        entity_id = item['entity_id']
+                        if entity_id not in result["itemsMap"]:
+                            result["itemsMap"][entity_id] = []
+                        
+                        result["itemsMap"][entity_id].append({
+                            "id": list_id,
+                            "name": list_data.get("name")
+                        })
             
-        return jsonify({
-            "success": True,
-            "lists": all_lists
-        })
+            return jsonify({
+                "success": True,
+                "data": result
+            })
+        finally:
+            conn.close()
+            
     except Exception as e:
-        print(f"Error fetching lists: {str(e)}")
+        print(f"Error fetching all list items: {str(e)}")
         return jsonify({
             "success": False,
-            "error": f"Failed to fetch lists: {str(e)}"
+            "error": f"Failed to fetch list items: {str(e)}"
         }), 500
 
 @product_discovery_bp.route("/api/lists", methods=["POST"])
@@ -2326,5 +2126,220 @@ def export_list_to_csv(current_user, list_id):
         return jsonify({
             "success": False,
             "error": f"Failed to export list: {str(e)}"
+        }), 500
+
+@product_discovery_bp.route("/api/category-filter-options", methods=["GET"])
+@token_required
+@project_access_required
+def get_category_filter_options(current_user, cloud_project_id=None):
+    """Get enhanced category filter options with counts for all category levels"""
+    try:
+        # Get request parameters
+        merchant_center_id = request.args.get('merchant_center_id')
+        mapped_market = request.args.get('mapped_market')  # For bestseller filtering
+        original_code = request.args.get('original_code')  # For products filtering
+        date_filter = request.args.get('date', None)
+        dates = request.args.getlist('dates[]')  # Get multiple dates as array
+
+        # Validate required parameters
+        if not cloud_project_id:
+            return jsonify({"error": "Missing cloud_project_id parameter"}), 400
+        if not merchant_center_id:
+            return jsonify({"error": "Missing merchant_center_id parameter"}), 400
+            
+        # Determine country code for filtering
+        country_code = mapped_market or original_code or request.args.get('country')
+        if not country_code:
+            return jsonify({"error": "Missing country code parameter"}), 400
+            
+        # Determine feed label for product filtering
+        feed_label = original_code or country_code
+            
+        # Build date filter for the query
+        date_filter_clause = ""
+        if dates and len(dates) > 0:
+            date_strings = [f"'{date}'" for date in dates]
+            date_filter_clause = f"date_month IN ({', '.join(date_strings)})"
+        elif date_filter:
+            date_filter_clause = f"date_month = '{date_filter}'"
+        else:
+            # Default to most recent month if no date specified
+            date_filter_clause = "(SELECT MAX(date_month) FROM `s360-demand-sensing.ds_master_transformed_data.bestseller_monthly`)"
+
+        # Build the query with parameters
+        query = f"""
+        WITH products AS (
+          SELECT
+            m.entity_id,
+            MAX(CASE WHEN p.availability = 'in stock' THEN 1 ELSE 0 END) AS in_stock,
+            CASE
+              WHEN MAX(CASE WHEN p.availability = 'in stock' THEN 1 ELSE 0 END) = 0
+              THEN 1 ELSE 0
+            END AS out_of_stock,
+            1 AS in_assortment
+          FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}` p
+          JOIN `{cloud_project_id}.ds_raw_data.BestSellersEntityProductMapping_{merchant_center_id}` m
+                ON LOWER(p.product_id) = LOWER(m.product_id)
+          WHERE p._PARTITIONTIME = (
+                  SELECT MAX(_PARTITIONTIME)
+                  FROM `{cloud_project_id}.ds_raw_data.Products_{merchant_center_id}`)
+            AND channel = 'online'
+            AND LOWER(feed_label) = '{feed_label.lower()}'
+          GROUP BY m.entity_id
+        ),
+        bestseller_main AS (
+          SELECT DISTINCT
+            entity_id,
+            category,
+            category_l2,
+            category_l3
+          FROM `s360-demand-sensing.ds_master_transformed_data.bestseller_monthly`
+          WHERE {date_filter_clause}
+            AND country_code = '{country_code}'
+        )
+        SELECT
+          CASE
+            WHEN GROUPING(b.category_l3) = 0 THEN 'L3'
+            WHEN GROUPING(b.category_l2) = 0 THEN 'L2'
+            ELSE 'L1'
+          END AS category_level,
+          b.category,
+          b.category_l2,
+          b.category_l3,
+          SUM(p.in_stock) AS in_stock_count,
+          SUM(p.out_of_stock) AS out_of_stock_count,
+          SUM(p.in_assortment) AS in_assortment_count,
+          COUNT(*) AS total_product_count
+        FROM bestseller_main b
+        LEFT JOIN products p USING (entity_id)
+        GROUP BY
+          ROLLUP(b.category, b.category_l2, b.category_l3)
+        HAVING
+          NOT (GROUPING(b.category) = 1
+               AND GROUPING(b.category_l2) = 1
+               AND GROUPING(b.category_l3) = 1)
+        ORDER BY
+          category_level, b.category, b.category_l2, b.category_l3
+        """
+
+        # Execute the query
+        query_job = bigquery_client.query(query)
+        results = query_job.result()
+        
+        # Simplify the response structure by flattening the hierarchy
+        categories = []
+        category_hierarchy = {}
+        
+        # Process query results into a simplified structure
+        for row in results:
+            level = row.category_level
+            cat_name = row.category
+            cat_l2 = row.category_l2
+            cat_l3 = row.category_l3
+            
+            # Default to 0 for any None values
+            in_stock_count = row.in_stock_count or 0
+            out_of_stock_count = row.out_of_stock_count or 0
+            in_assortment_count = row.in_assortment_count or 0
+            total_product_count = row.total_product_count or 0
+            
+            # Skip rows with None category at their respective level
+            if (level == 'L1' and not cat_name) or \
+               (level == 'L2' and not cat_l2) or \
+               (level == 'L3' and not cat_l3):
+                continue
+                
+            # Process each level into a simplified, uniform structure
+            if level == 'L1':
+                category_obj = {
+                    "level": "L1",
+                    "name": cat_name,
+                    "path": cat_name,
+                    "parent": None,
+                    "count": in_assortment_count,  # DEFAULT count is now in_assortment
+                    "total_count": total_product_count,
+                    "in_assortment_count": in_assortment_count,
+                    "in_stock_count": in_stock_count,
+                    "out_of_stock_count": out_of_stock_count
+                }
+                categories.append(category_obj)
+                
+                # Build hierarchy in parallel
+                if cat_name not in category_hierarchy:
+                    category_hierarchy[cat_name] = {}
+                    
+            elif level == 'L2' and cat_name and cat_l2:
+                category_obj = {
+                    "level": "L2",
+                    "name": cat_l2,
+                    "path": f"{cat_name}|{cat_l2}",
+                    "parent": cat_name,
+                    "count": in_assortment_count,  # DEFAULT count is now in_assortment
+                    "total_count": total_product_count,
+                    "in_assortment_count": in_assortment_count,
+                    "in_stock_count": in_stock_count,
+                    "out_of_stock_count": out_of_stock_count
+                }
+                categories.append(category_obj)
+                
+                # Update hierarchy
+                if cat_name not in category_hierarchy:
+                    category_hierarchy[cat_name] = {}
+                category_hierarchy[cat_name][cat_l2] = {}
+                
+            elif level == 'L3' and cat_name and cat_l2 and cat_l3:
+                category_obj = {
+                    "level": "L3",
+                    "name": cat_l3,
+                    "path": f"{cat_name}|{cat_l2}|{cat_l3}",
+                    "parent": f"{cat_name}|{cat_l2}",
+                    "count": in_assortment_count,  # DEFAULT count is now in_assortment
+                    "total_count": total_product_count,
+                    "in_assortment_count": in_assortment_count,
+                    "in_stock_count": in_stock_count,
+                    "out_of_stock_count": out_of_stock_count
+                }
+                categories.append(category_obj)
+                
+                # Update hierarchy
+                if cat_name not in category_hierarchy:
+                    category_hierarchy[cat_name] = {}
+                if cat_l2 not in category_hierarchy[cat_name]:
+                    category_hierarchy[cat_name][cat_l2] = {}
+                category_hierarchy[cat_name][cat_l2][cat_l3] = {}
+        
+        # Extract L1 categories for the distinct list
+        l1_categories = [cat["name"] for cat in categories if cat["level"] == "L1"]
+        
+        # Sort L1 categories by IN ASSORTMENT count (highest first) - not total
+        # Use a safe comparison with default of 0 for any None values
+        try:
+            l1_categories.sort(
+                key=lambda x: next((cat["in_assortment_count"] for cat in categories 
+                                if cat["level"] == "L1" and cat["name"] == x), 0),
+                reverse=True
+            )
+        except Exception as sort_error:
+            print(f"Error during category sorting: {sort_error}")
+            # Use a simpler sorting as fallback
+            l1_categories.sort()
+            
+        # Print debugging info
+        print(f"Processed {len(categories)} total categories, {len(l1_categories)} L1 categories")
+        
+        return jsonify({
+            "success": True,
+            "categories": categories,             # Flattened array of all categories with uniform structure
+            "distinct_categories": l1_categories, # For backward compatibility
+            "hierarchy": category_hierarchy,      # For tree view rendering
+            "display_default": "in_assortment"    # NEW: Signal to frontend which count to display by default
+        })
+    except Exception as e:
+        print(f"Error fetching category filter options: {str(e)}")
+        traceback_str = traceback.format_exc()
+        print(f"Traceback: {traceback_str}")
+        return jsonify({
+            "success": False,
+            "error": f"Failed to fetch category filter options: {str(e)}"
         }), 500
 
