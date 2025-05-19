@@ -39,6 +39,11 @@ def get_pricing_data(current_user, cloud_project_id = None):
         min_price = request.args.get('min_price', None, type=float)
         max_price = request.args.get('max_price', None, type=float)
         
+        # Get country code filter parameter
+        country_code = request.args.get('code', None)
+        # Get mappedMarket filter parameter
+        mapped_market = request.args.get('mappedMarket', None)
+
         # Get pagination parameters
         limit = request.args.get('limit', 20, type=int)
         offset = request.args.get('offset', 0, type=int)
@@ -56,6 +61,38 @@ def get_pricing_data(current_user, cloud_project_id = None):
                 "success": False,
                 "error": "Missing required parameters: merchant_center_id and project_id"
             }), 400
+        
+        # Country code filter clause for last7days (uses mappedMarket)
+        country_code_clause_last7days = ""
+        if mapped_market:
+            # Handle special case where mappedMarket is '-'
+            if mapped_market == '-':
+                print(f"Received special mappedMarket '-' - not applying country filter for last7days")
+                # Don't apply country filter in this case
+            else:
+                safe_mapped_market = mapped_market.replace("'", "''")
+                country_code_clause_last7days = f"AND LOWER(customer_country_code) = LOWER('{safe_mapped_market}')"
+                print(f"Applied country filter with mappedMarket: {safe_mapped_market} for last7days")
+        elif country_code:
+            # Fallback to code if mappedMarket is not provided
+            if country_code == '-':
+                print(f"Received special code '-' - not applying country filter for last7days")
+            else:
+                safe_country_code = country_code.replace("'", "''")
+                country_code_clause_last7days = f"AND LOWER(customer_country_code) = LOWER('{safe_country_code}')"
+                print(f"Applied country filter with code (fallback): {safe_country_code} for last7days")
+        
+        # Country code filter clause for insights (uses code)
+        country_code_clause_insights = ""
+        if country_code:
+            # Handle special case where code is '-'
+            if country_code == '-':
+                print(f"Received special code '-' - not applying country filter for insights")
+                # Don't apply country filter in this case
+            else:
+                safe_country_code = country_code.replace("'", "''")
+                country_code_clause_insights = f"AND LOWER(SPLIT(LEFT(id, 13), \":\")[OFFSET(2)]) = LOWER('{safe_country_code}')"
+                print(f"Applied country filter with code: {safe_country_code} for insights")
         
         # Build filter clauses
         brand_filter_clause = ""
@@ -125,6 +162,7 @@ def get_pricing_data(current_user, cloud_project_id = None):
             SUM(impressions) AS last7days_impressions
           FROM `{cloud_project_id}.ds_raw_data.ProductPerformance_{merchant_center_id}`
           WHERE DATE(_PARTITIONTIME) BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 6 DAY) AND CURRENT_DATE()
+          {country_code_clause_last7days}
           GROUP BY
             offer_id, title, brand, product_type_l1, product_type_l2, product_type_l3
         ),
@@ -141,6 +179,7 @@ def get_pricing_data(current_user, cloud_project_id = None):
             SELECT MAX(_PARTITIONTIME)
             FROM `{cloud_project_id}.ds_raw_data.PriceInsights_{merchant_center_id}`
           )
+          {country_code_clause_insights}
         )
         
         SELECT
@@ -188,6 +227,7 @@ def get_pricing_data(current_user, cloud_project_id = None):
             SUM(impressions) AS last7days_impressions
           FROM `{cloud_project_id}.ds_raw_data.ProductPerformance_{merchant_center_id}`
           WHERE DATE(_PARTITIONTIME) BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 6 DAY) AND CURRENT_DATE()
+          {country_code_clause_last7days}
           GROUP BY
             offer_id, title, brand, product_type_l1, product_type_l2, product_type_l3
         ),
@@ -204,6 +244,7 @@ def get_pricing_data(current_user, cloud_project_id = None):
             SELECT MAX(_PARTITIONTIME)
             FROM `{cloud_project_id}.ds_raw_data.PriceInsights_{merchant_center_id}`
           )
+          {country_code_clause_insights}
         )
         
         SELECT 
@@ -284,6 +325,7 @@ def get_pricing_data(current_user, cloud_project_id = None):
             SELECT MAX(_PARTITIONTIME)
             FROM `{cloud_project_id}.ds_raw_data.PriceInsights_{merchant_center_id}`
           )
+          {country_code_clause_insights}
         )
         
         SELECT 
@@ -305,6 +347,7 @@ def get_pricing_data(current_user, cloud_project_id = None):
           product_type_l3
         FROM `{cloud_project_id}.ds_raw_data.ProductPerformance_{merchant_center_id}`
         WHERE DATE(_PARTITIONTIME) BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 6 DAY) AND CURRENT_DATE()
+        {country_code_clause_last7days}
         ORDER BY product_type_l1, product_type_l2, product_type_l3
         """
         
@@ -321,7 +364,7 @@ def get_pricing_data(current_user, cloud_project_id = None):
             
             if row.product_type_l3:
                 product_types[row.product_type_l1][row.product_type_l2].append(row.product_type_l3)
-        
+
         # Prepare the response
         response = {
             "success": True,
@@ -355,12 +398,49 @@ def get_pricing_filters(current_user, cloud_project_id = None):
         # Get merchant center ID if provided
         merchant_center_id = request.args.get('merchant_center_id', None)
         
+        # Get country code filter parameter
+        country_code = request.args.get('code', None)
+        # Get mappedMarket filter parameter
+        mapped_market = request.args.get('mappedMarket', None)
+
         # Validation: ensure we have the required parameters
         if not merchant_center_id or not cloud_project_id:
             return jsonify({
                 "success": False,
                 "error": "Missing required parameters: merchant_center_id and project_id"
             }), 400
+        
+        # Country code filter clause for last7days (uses mappedMarket)
+        country_code_clause_last7days = ""
+        if mapped_market:
+            # Handle special case where mappedMarket is '-'
+            if mapped_market == '-':
+                print(f"Received special mappedMarket '-' - not applying country filter for last7days")
+                # Don't apply country filter in this case
+            else:
+                safe_mapped_market = mapped_market.replace("'", "''")
+                country_code_clause_last7days = f"AND LOWER(customer_country_code) = LOWER('{safe_mapped_market}')"
+                print(f"Applied country filter with mappedMarket: {safe_mapped_market} for last7days")
+        elif country_code:
+            # Fallback to code if mappedMarket is not provided
+            if country_code == '-':
+                print(f"Received special code '-' - not applying country filter for last7days")
+            else:
+                safe_country_code = country_code.replace("'", "''")
+                country_code_clause_last7days = f"AND LOWER(customer_country_code) = LOWER('{safe_country_code}')"
+                print(f"Applied country filter with code (fallback): {safe_country_code} for last7days")
+        
+        # Country code filter clause for insights (uses code)
+        country_code_clause_insights = ""
+        if country_code:
+            # Handle special case where code is '-'
+            if country_code == '-':
+                print(f"Received special code '-' - not applying country filter for insights")
+                # Don't apply country filter in this case
+            else:
+                safe_country_code = country_code.replace("'", "''")
+                country_code_clause_insights = f"AND LOWER(SPLIT(LEFT(id, 13), \":\")[OFFSET(2)]) = LOWER('{safe_country_code}')"
+                print(f"Applied country filter with code: {safe_country_code} for insights")
         
         # Create BigQuery client
         credentials_info = json.loads(BIGQUERY_SERVICE_ACCOUNT)
@@ -378,6 +458,7 @@ def get_pricing_filters(current_user, cloud_project_id = None):
             SELECT MAX(_PARTITIONTIME)
             FROM `{cloud_project_id}.ds_raw_data.PriceInsights_{merchant_center_id}`
           )
+          {country_code_clause_insights}
         )
         
         SELECT 
@@ -395,6 +476,7 @@ def get_pricing_filters(current_user, cloud_project_id = None):
           product_type_l3
         FROM `{cloud_project_id}.ds_raw_data.ProductPerformance_{merchant_center_id}`
         WHERE DATE(_PARTITIONTIME) BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 6 DAY) AND CURRENT_DATE()
+        {country_code_clause_last7days}
         ORDER BY product_type_l1, product_type_l2, product_type_l3
         """
         
@@ -404,6 +486,7 @@ def get_pricing_filters(current_user, cloud_project_id = None):
         FROM `{cloud_project_id}.ds_raw_data.ProductPerformance_{merchant_center_id}`
         WHERE DATE(_PARTITIONTIME) BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 6 DAY) AND CURRENT_DATE()
         AND brand IS NOT NULL AND brand != ''
+        {country_code_clause_last7days}
         ORDER BY brand
         """
         
@@ -507,13 +590,23 @@ def create_stream(current_user):
             if field not in data:
                 return jsonify({"error": f"Missing required field: {field}"}), 400
         
+        # Get filters with both code and mappedMarket
+        filters = data["filters"]
+        
+        # Ensure both code and mappedMarket are included in the filters
+        # If mappedMarket is not provided but code is, use code as mappedMarket
+        if "code" in filters and "mappedMarket" not in filters:
+            filters["mappedMarket"] = filters["code"]
+        # If code is not provided but mappedMarket is, store mappedMarket but don't use it as code
+        # as code needs to be the actual country code
+        
         # Create new stream document
         new_stream = {
             "name": data["name"],
             "description": data.get("description", ""),
             "project_id": data["project_id"],
             "merchant_center_id": data["merchant_center_id"],
-            "filters": data["filters"],
+            "filters": filters,
             "created_by": current_user,
             "created_at": firestore.SERVER_TIMESTAMP,
             "updated_at": firestore.SERVER_TIMESTAMP
@@ -571,7 +664,18 @@ def update_stream(current_user, stream_id):
         # Add fields from request data
         for field in allowed_fields:
             if field in data:
-                update_data[field] = data[field]
+                # Special handling for filters to ensure mappedMarket is included
+                if field == "filters" and data[field]:
+                    filters = data[field]
+                    
+                    # Ensure both code and mappedMarket are included in the filters
+                    # If mappedMarket is not provided but code is, use code as mappedMarket
+                    if "code" in filters and "mappedMarket" not in filters:
+                        filters["mappedMarket"] = filters["code"]
+                    
+                    update_data[field] = filters
+                else:
+                    update_data[field] = data[field]
         
         # Update the stream document
         stream_ref.update(update_data)
@@ -651,6 +755,43 @@ def get_public_stream(stream_id):
         
         if not cloud_project_id:
             return jsonify({"error": "Invalid project configuration"}), 500
+        
+        # Get country code from filters
+        country_code = filters.get('code')
+        # Get mappedMarket from filters (could be the same as code if not explicitly set)
+        mapped_market = filters.get('mappedMarket', country_code)
+        
+        # Country code filter clause for last7days (uses mappedMarket)
+        country_code_clause_last7days = ""
+        if mapped_market:
+            # Handle special case where mappedMarket is '-'
+            if mapped_market == '-':
+                print(f"Received special mappedMarket '-' - not applying country filter for stream last7days")
+                # Don't apply country filter in this case
+            else:
+                safe_mapped_market = mapped_market.replace("'", "''")
+                country_code_clause_last7days = f"AND LOWER(customer_country_code) = LOWER('{safe_mapped_market}')"
+                print(f"Applied country filter with mappedMarket: {safe_mapped_market} for stream last7days")
+        elif country_code:
+            # Fallback to code if mappedMarket is not provided
+            if country_code == '-':
+                print(f"Received special code '-' - not applying country filter for stream last7days")
+            else:
+                safe_country_code = country_code.replace("'", "''")
+                country_code_clause_last7days = f"AND LOWER(customer_country_code) = LOWER('{safe_country_code}')"
+                print(f"Applied country filter with code (fallback): {safe_country_code} for stream last7days")
+        
+        # Country code filter clause for insights (uses code)
+        country_code_clause_insights = ""
+        if country_code:
+            # Handle special case where code is '-'
+            if country_code == '-':
+                print(f"Received special code '-' - not applying country filter for stream insights")
+                # Don't apply country filter in this case
+            else:
+                safe_country_code = country_code.replace("'", "''")
+                country_code_clause_insights = f"AND LOWER(SPLIT(LEFT(id, 13), \":\")[OFFSET(2)]) = LOWER('{safe_country_code}')"
+                print(f"Applied country filter with code: {safe_country_code} for stream insights")
         
         # Build filter clauses for the query
         
@@ -738,6 +879,7 @@ def get_public_stream(stream_id):
             SUM(impressions) AS last7days_impressions
           FROM `{cloud_project_id}.ds_raw_data.ProductPerformance_{merchant_center_id}`
           WHERE DATE(_PARTITIONTIME) BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 6 DAY) AND CURRENT_DATE()
+          {country_code_clause_last7days}
           GROUP BY
             offer_id, title, brand, product_type_l1, product_type_l2, product_type_l3
         ),
@@ -754,6 +896,7 @@ def get_public_stream(stream_id):
             SELECT MAX(_PARTITIONTIME)
             FROM `{cloud_project_id}.ds_raw_data.PriceInsights_{merchant_center_id}`
           )
+          {country_code_clause_insights}
         )
         
         SELECT
@@ -794,11 +937,11 @@ def get_public_stream(stream_id):
         
         query_job = client.query(query)
         results = query_job.result()
-        
+
         # Process the results and create XML
         from xml.etree.ElementTree import Element, SubElement, tostring
         import xml.dom.minidom
-        
+
         # Create the root element as RSS
         root = Element('rss')
         root.set('xmlns:g', 'http://base.google.com/ns/1.0')
