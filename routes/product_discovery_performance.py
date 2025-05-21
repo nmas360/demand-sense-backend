@@ -58,6 +58,12 @@ def analyze_product_discovery_performance(current_user=""):
                 bigquery.SchemaField("products_out_stock", "INTEGER", mode="NULLABLE"),
                 bigquery.SchemaField("total_products", "INTEGER", mode="NULLABLE"),
                 bigquery.SchemaField("share_percentage", "FLOAT", mode="NULLABLE"),
+                bigquery.SchemaField("products_rank_below_10", "INTEGER", mode="NULLABLE"),
+                bigquery.SchemaField("products_rank_below_50", "INTEGER", mode="NULLABLE"),
+                bigquery.SchemaField("products_rank_below_100", "INTEGER", mode="NULLABLE"),
+                bigquery.SchemaField("products_rank_below_250", "INTEGER", mode="NULLABLE"),
+                bigquery.SchemaField("products_rank_below_500", "INTEGER", mode="NULLABLE"),
+                bigquery.SchemaField("products_rank_below_1000", "INTEGER", mode="NULLABLE"),
                 bigquery.SchemaField("backfill", "BOOLEAN", mode="REQUIRED")
             ]
             
@@ -250,7 +256,8 @@ def analyze_product_discovery_performance(current_user=""):
                     bestseller_main AS (
                       SELECT DISTINCT
                         entity_id,
-                        category
+                        category,
+                        CAST(rank AS INT64) AS rank
                       FROM `s360-demand-sensing.ds_master_transformed_data.bestseller_monthly`
                       WHERE date_month = '{bestseller_date}' 
                         AND country_code = '{bestseller_country_code}' 
@@ -261,7 +268,13 @@ def analyze_product_discovery_performance(current_user=""):
                         SUM(IFNULL(p.in_stock, 0)) AS in_stock_count,
                         SUM(IFNULL(p.out_of_stock, 0)) AS out_of_stock_count,
                         SUM(IFNULL(p.in_assortment, 0)) AS in_assortment_count,
-                        COUNT(*) AS total_product_count
+                        COUNT(*) AS total_product_count,
+                        SUM(CASE WHEN b.rank < 10 AND p.in_assortment = 1 THEN 1 ELSE 0 END) AS products_rank_below_10,
+                        SUM(CASE WHEN b.rank < 50 AND p.in_assortment = 1 THEN 1 ELSE 0 END) AS products_rank_below_50,
+                        SUM(CASE WHEN b.rank < 100 AND p.in_assortment = 1 THEN 1 ELSE 0 END) AS products_rank_below_100,
+                        SUM(CASE WHEN b.rank < 250 AND p.in_assortment = 1 THEN 1 ELSE 0 END) AS products_rank_below_250,
+                        SUM(CASE WHEN b.rank < 500 AND p.in_assortment = 1 THEN 1 ELSE 0 END) AS products_rank_below_500,
+                        SUM(CASE WHEN b.rank < 1000 AND p.in_assortment = 1 THEN 1 ELSE 0 END) AS products_rank_below_1000
                       FROM bestseller_main b
                       LEFT JOIN products p USING (entity_id)
                       GROUP BY b.category
@@ -269,7 +282,7 @@ def analyze_product_discovery_performance(current_user=""):
                     SELECT *
                     FROM merge_data
                     """
-                    #print(query)
+                    
                     try:
                         #print(f"Executing query for {merchant_center_id}, date {bestseller_date}")
                         # Execute query
@@ -309,7 +322,13 @@ def analyze_product_discovery_performance(current_user=""):
                                 "products_out_stock": out_of_stock_count,
                                 "products_in_assortment": in_assortment_count,
                                 "total_products": total_product_count,
-                                "share_percentage": share_percentage
+                                "share_percentage": share_percentage,
+                                "products_rank_below_10": row.products_rank_below_10 if hasattr(row, 'products_rank_below_10') else 0,
+                                "products_rank_below_50": row.products_rank_below_50 if hasattr(row, 'products_rank_below_50') else 0,
+                                "products_rank_below_100": row.products_rank_below_100 if hasattr(row, 'products_rank_below_100') else 0,
+                                "products_rank_below_250": row.products_rank_below_250 if hasattr(row, 'products_rank_below_250') else 0,
+                                "products_rank_below_500": row.products_rank_below_500 if hasattr(row, 'products_rank_below_500') else 0,
+                                "products_rank_below_1000": row.products_rank_below_1000 if hasattr(row, 'products_rank_below_1000') else 0
                             }
                             
                             category_results.append(category_result)
@@ -360,7 +379,13 @@ def analyze_product_discovery_performance(current_user=""):
                                     "products_in_stock": category_result["products_in_stock"],
                                     "products_out_stock": category_result["products_out_stock"],
                                     "total_products": category_result["total_products"],
-                                    "share_percentage": category_result["share_percentage"]
+                                    "share_percentage": category_result["share_percentage"],
+                                    "products_rank_below_10": category_result["products_rank_below_10"],
+                                    "products_rank_below_50": category_result["products_rank_below_50"],
+                                    "products_rank_below_100": category_result["products_rank_below_100"],
+                                    "products_rank_below_250": category_result["products_rank_below_250"],
+                                    "products_rank_below_500": category_result["products_rank_below_500"],
+                                    "products_rank_below_1000": category_result["products_rank_below_1000"]
                                 }
                                 
                                 rows_to_insert.append(row)
@@ -406,69 +431,31 @@ def analyze_product_discovery_performance(current_user=""):
     })
 
 
-
-
-    
-@product_discovery_performance_bp.route("/api/data/category-trend", methods=["GET"])
-@token_required
-def get_category_trend(current_user):
-    try:
-        
-        # Define the query to get top categories trend
-        query = """
-        SELECT 
-            bestseller_date,
-            AVG(share_percentage) as avg_share_percentage
-        FROM `s360-demand-sensing.web_app_logs.category_assortment_analysis`
-        WHERE is_top_category = true
-        GROUP BY 1
-        ORDER BY 1
-        """
-        
-        # Run the query
-        query_job = bigquery_client.query(query)
-        results = query_job.result()
-        
-        # Convert results to a list of dictionaries
-        trend_data = []
-        for row in results:
-            trend_data.append({
-                "date": row.bestseller_date.strftime('%Y-%m-%d') if row.bestseller_date else None,
-                "avgSharePercentage": row.avg_share_percentage
-            })
-        
-        return jsonify({
-            "success": True,
-            "data": trend_data
-        })
-    
-    except Exception as e:
-        print(f"Error fetching category trend data: {str(e)}")
-        return jsonify({
-            "success": False,
-            "error": "Failed to fetch category trend data"
-        }), 500
-
-@product_discovery_performance_bp.route("/api/performance/category-demand", methods=["GET"])
+@product_discovery_performance_bp.route("/api/performance/scorecards", methods=["GET"])
 @token_required
 @project_access_required
-def get_category_demand_data(current_user, cloud_project_id=None):
+def get_performance_scorecards(current_user, cloud_project_id=None):
     """
-    Get category demand data over time for the area chart in the Performance dashboard.
+    Get performance scorecards data for the Performance dashboard.
     Required query parameters:
-    - country: The country code to filter by
+    - country: The country code(s) to filter by (comma-separated for multiple countries)
     - project_id: The Firestore project ID to filter by
     Optional query parameters:
     - categories: Comma-separated list of categories to filter by
     """
     try:
         # Get parameters from request
-        country = request.args.get("country")
+        countries_param = request.args.get("country")
         categories_param = request.args.get("categories")
         
         # Validate country parameter
-        if not country:
+        if not countries_param:
             return jsonify({"error": "Country parameter is required"}), 400
+            
+        # Parse countries from comma-separated list
+        countries = [country.strip() for country in countries_param.split(",")]
+        if not countries:
+            return jsonify({"error": "At least one valid country is required"}), 400
             
         # Get project ID - use the one from the decorator or from query param
         project_id = request.args.get("project_id", cloud_project_id)
@@ -483,99 +470,411 @@ def get_category_demand_data(current_user, cloud_project_id=None):
         # Create BigQuery client
         client = bigquery.Client()
         
-        # Build the query to get time series data
+        # Create countries clause for SQL IN statement
+        countries_clause = ", ".join([f"'{country}'" for country in countries])
+        
+        # Build the query to get scorecards data with current and previous month metrics
         query = f"""
-        WITH category_data AS (
-            SELECT 
+        WITH all_data AS (
+            SELECT DISTINCT
                 bestseller_date,
+                country_code_bs,
                 category,
-                AVG(share_percentage) as share_percentage
-            FROM `s360-demand-sensing.web_app_logs.category_assortment_analysis`
+                share_percentage,
+                total_products,
+                products_in_assortment,
+                products_out_stock
+            FROM `s360-demand-sensing.project_performance.product_discovery_performance`
             WHERE project_id = '{project_id}'
-            AND country_code = '{country}'
+            AND products_in_assortment > 0
+            AND country_code_bs IN ({countries_clause})
         """
         
         # Add category filter if provided
         if categories and len(categories) > 0:
             category_conditions = ", ".join([f"'{cat.strip()}'" for cat in categories])
             query += f"AND category IN ({category_conditions})"
-            
-        # Complete the query
+        
+        # Close the all_data CTE
         query += """
-            GROUP BY bestseller_date, category
+        ),
+        
+        -- Get the latest two months of data
+        date_ranks AS (
+            SELECT 
+                bestseller_date,
+                DENSE_RANK() OVER (ORDER BY bestseller_date DESC) as date_rank
+            FROM all_data
+            GROUP BY bestseller_date
+        ),
+        
+        top_dates AS (
+            SELECT bestseller_date, date_rank
+            FROM date_ranks
+            WHERE date_rank <= 2
+        ),
+        
+        -- Join with data to get metrics for current and previous month
+        monthly_data AS (
+            SELECT 
+                d.bestseller_date,
+                d.country_code_bs,
+                d.category,
+                d.share_percentage,
+                d.total_products - d.products_in_assortment AS products_outside_assortment,
+                d.products_out_stock,
+                td.date_rank
+            FROM all_data d
+            JOIN top_dates td ON d.bestseller_date = td.bestseller_date
+        ),
+        
+        category_country_data AS (
+            SELECT 
+                bestseller_date,
+                date_rank,
+                country_code_bs,
+                category,
+                AVG(share_percentage) as share_percentage,
+                SUM(products_outside_assortment) AS total_products_outside_assortment,
+                SUM(products_out_stock) AS total_products_out_of_stock
+            FROM monthly_data
+            GROUP BY bestseller_date, date_rank, country_code_bs, category
+        ),
+        
+        category_data AS (
+            SELECT 
+                bestseller_date,
+                date_rank,
+                category,
+                AVG(share_percentage) as share_percentage,
+                SUM(total_products_outside_assortment) AS total_products_outside_assortment,
+                SUM(total_products_out_of_stock) AS total_products_out_of_stock
+            FROM category_country_data
+            GROUP BY bestseller_date, date_rank, category
+        ),
+        
+        -- Aggregate by month
+        aggregated_data AS (
+            SELECT
+                bestseller_date,
+                date_rank,
+                AVG(share_percentage) as avg_share_percentage,
+                SUM(total_products_outside_assortment) as total_products_outside_assortment,
+                SUM(total_products_out_of_stock) as total_products_out_of_stock
+            FROM category_data
+            GROUP BY bestseller_date, date_rank
         )
-        SELECT 
-            bestseller_date,
+        
+        -- Final result with current and previous month data
+        SELECT
+            current_month.bestseller_date as current_date,
+            prev_month.bestseller_date as prev_date,
+            current_month.avg_share_percentage as current_share_percentage,
+            prev_month.avg_share_percentage as prev_share_percentage,
+            CASE 
+                WHEN prev_month.avg_share_percentage > 0 
+                THEN (current_month.avg_share_percentage - prev_month.avg_share_percentage) / prev_month.avg_share_percentage
+                ELSE NULL 
+            END as share_percentage_growth,
+            
+            current_month.total_products_outside_assortment as current_products_outside_assortment,
+            prev_month.total_products_outside_assortment as prev_products_outside_assortment,
+            CASE 
+                WHEN prev_month.total_products_outside_assortment > 0 
+                THEN (current_month.total_products_outside_assortment - prev_month.total_products_outside_assortment) / prev_month.total_products_outside_assortment
+                ELSE NULL 
+            END as products_outside_assortment_growth,
+            
+            current_month.total_products_out_of_stock as current_products_out_of_stock,
+            prev_month.total_products_out_of_stock as prev_products_out_of_stock,
+            CASE 
+                WHEN prev_month.total_products_out_of_stock > 0 
+                THEN (current_month.total_products_out_of_stock - prev_month.total_products_out_of_stock) / prev_month.total_products_out_of_stock
+                ELSE NULL 
+            END as products_out_of_stock_growth
+        FROM 
+            aggregated_data current_month
+        LEFT JOIN 
+            aggregated_data prev_month ON current_month.date_rank = 1 AND prev_month.date_rank = 2
+        WHERE 
+            current_month.date_rank = 1
+        """
+        
+
+        query_job = client.query(query)
+        results = query_job.result()
+        
+        # Process the results
+        scorecard_data = None
+        
+        for row in results:
+            scorecard_data = {
+                "bestseller_date": row.current_date.strftime("%Y-%m-%d") if row.current_date else None,
+                "prev_bestseller_date": row.prev_date.strftime("%Y-%m-%d") if row.prev_date else None,
+                
+                # Current month metrics
+                "avg_share_percentage": row.current_share_percentage,
+                "total_products_outside_assortment": row.current_products_outside_assortment,
+                "total_products_out_of_stock": row.current_products_out_of_stock,
+                
+                # Growth percentages
+                "share_percentage_growth": row.share_percentage_growth,
+                "products_outside_assortment_growth": row.products_outside_assortment_growth,
+                "products_out_of_stock_growth": row.products_out_of_stock_growth
+            }
+            break
+        
+        # Return the data with defaults if no data was found
+        if not scorecard_data:
+            scorecard_data = {
+                "bestseller_date": None,
+                "prev_bestseller_date": None,
+                "avg_share_percentage": 0,
+                "total_products_outside_assortment": 0,
+                "total_products_out_of_stock": 0,
+                "share_percentage_growth": None,
+                "products_outside_assortment_growth": None,
+                "products_out_of_stock_growth": None
+            }
+            
+        return jsonify({
+            "success": True,
+            "data": scorecard_data,
+            "project_id": project_id,
+            "country": countries_param
+        })
+        
+    except Exception as e:
+        print(f"Error fetching performance scorecards data: {str(e)}")
+        traceback.print_exc()  # Print stack trace for better debugging
+        return jsonify({
+            "success": False,
+            "error": f"Failed to fetch performance scorecards data: {str(e)}"
+        }), 500
+
+
+
+@product_discovery_performance_bp.route("/api/performance/categories", methods=["GET"])
+@token_required
+@project_access_required
+def get_performance_categories(current_user, cloud_project_id=None):
+    """
+    Get categories with products in assortment for the Performance dashboard.
+    Required query parameters:
+    - country: The country code(s) to filter by (comma-separated for multiple countries)
+    - project_id: The Firestore project ID to filter by
+    """
+    try:
+        # Get parameters from request
+        countries_param = request.args.get("country")
+        
+        # Validate country parameter
+        if not countries_param:
+            return jsonify({"error": "Country parameter is required"}), 400
+            
+        # Parse countries from comma-separated list
+        countries = [country.strip() for country in countries_param.split(",")]
+        if not countries:
+            return jsonify({"error": "At least one valid country is required"}), 400
+            
+        # Get project ID - use the one from the decorator or from query param
+        project_id = request.args.get("project_id", cloud_project_id)
+        if not project_id:
+            return jsonify({"error": "Project ID is required"}), 400
+            
+        # Create BigQuery client
+        client = bigquery.Client()
+        
+        # Create an IN clause for the countries
+        countries_clause = ", ".join([f'"{country}"' for country in countries])
+        
+        # Build the query to get categories with product counts across all selected countries
+        query = f"""
+        WITH category_data AS (
+            SELECT DISTINCT
+                category,
+                country_code_bs,
+                products_in_assortment
+            FROM `s360-demand-sensing.project_performance.product_discovery_performance`
+            WHERE LOWER(project_id) = LOWER("{project_id}")
+            AND bestseller_date = (SELECT MAX(bestseller_date) FROM `s360-demand-sensing.project_performance.product_discovery_performance`)
+            AND products_in_assortment > 0
+            AND country_code_bs IN ({countries_clause})
+        )
+        
+        SELECT
             category,
-            share_percentage
+            SUM(products_in_assortment) AS products_in_assortment
         FROM category_data
-        ORDER BY bestseller_date, share_percentage DESC
+        GROUP BY category
+        ORDER BY products_in_assortment DESC
         """
         
         # Run the query
         query_job = client.query(query)
         results = query_job.result()
         
-        # Process the results into a format suitable for a time series chart
-        # We need a format like: [{date: "2023-01-01", category1: value1, category2: value2, ...}]
-        time_series_data = {}
-        categories_set = set()
+        # Process the results
+        categories = []
+        category_counts = {}
         
         for row in results:
-            date_str = row.bestseller_date.strftime("%Y-%m-%d")
-            category = row.category
-            value = row.share_percentage
-            
-            if date_str not in time_series_data:
-                time_series_data[date_str] = {}
-                
-            time_series_data[date_str][category] = value
-            categories_set.add(category)
+            if row.category:
+                categories.append(row.category)
+                category_counts[row.category] = row.products_in_assortment
         
-        # Convert to list format for frontend
-        chart_data = []
-        categories_list = list(categories_set)
+        return jsonify({
+            "distinct_categories": categories,
+            "category_counts": category_counts
+        }), 200
         
-        for date_str in sorted(time_series_data.keys()):
-            data_point = {"date": date_str}
+    except Exception as e:
+        logging.error(f"Error getting performance categories: {str(e)}")
+        return jsonify({"error": f"Failed to get categories: {str(e)}"}), 500
+
+
+@product_discovery_performance_bp.route("/api/performance/category-timeseries", methods=["GET"])
+@token_required
+@project_access_required
+def get_category_timeseries(current_user, cloud_project_id=None):
+    """
+    Get category performance time series data for the Performance dashboard.
+    Required query parameters:
+    - country: The country code(s) to filter by (comma-separated for multiple countries)
+    - project_id: The Firestore project ID to filter by
+    Optional query parameters:
+    - categories: Comma-separated list of categories to filter by
+    
+    Returns time series data showing share percentage over time for each country+category combination,
+    with backfill information and merchant center products date.
+    """
+    try:
+        # Get parameters from request
+        countries_param = request.args.get("country")
+        categories_param = request.args.get("categories")
+        
+        # Validate country parameter
+        if not countries_param:
+            return jsonify({"error": "Country parameter is required"}), 400
             
-            for category in categories_list:
-                data_point[category] = time_series_data[date_str].get(category, 0)
-                
-            chart_data.append(data_point)
+        # Parse countries from comma-separated list
+        countries = [country.strip() for country in countries_param.split(",")]
+        if not countries:
+            return jsonify({"error": "At least one valid country is required"}), 400
             
-        # Return the data
+        # Get project ID - use the one from the decorator or from query param
+        project_id = request.args.get("project_id", cloud_project_id)
+        if not project_id:
+            return jsonify({"error": "Project ID is required"}), 400
+            
+        # Parse categories if provided
+        categories = []
+        if categories_param:
+            categories = [cat.strip() for cat in categories_param.split(",")]
+            
+        # Create BigQuery client
+        client = bigquery.Client()
+        
+        # Create an IN clause for the countries
+        countries_clause = ", ".join([f"'{country}'" for country in countries])
+        
+        # Build the query to get time series data
+        query = f"""
+        WITH data AS (
+            SELECT DISTINCT
+                bestseller_date,
+                country_code_bs,
+                category,
+                share_percentage,
+                backfill,
+                mc_products_date
+            FROM `s360-demand-sensing.project_performance.product_discovery_performance`
+            WHERE project_id = '{project_id}'
+            AND country_code_bs IN ({countries_clause})
+        ),
+        
+        category_data AS (
+            SELECT 
+                bestseller_date,
+                country_code_bs,
+                category,
+                AVG(share_percentage) as share_percentage,
+                MAX(backfill) AS backfill,
+                MAX(mc_products_date) as mc_products_date
+            FROM data
+        """
+        
+        # Add category filter if provided
+        if categories and len(categories) > 0:
+            category_conditions = ", ".join([f"'{cat}'" for cat in categories])
+            query += f"WHERE category IN ({category_conditions})"
+            
+        # Complete the query
+        query += """
+            GROUP BY bestseller_date, country_code_bs, category
+        )
+        SELECT 
+            bestseller_date,
+            country_code_bs,
+            category,
+            share_percentage,
+            backfill,
+            mc_products_date
+        FROM category_data
+        ORDER BY bestseller_date, country_code_bs, share_percentage DESC
+        """
+        
+        # Run the query
+        query_job = client.query(query)
+        results = query_job.result()
+        
+        # Process the results
+        timeseries_data = []
+        
+        for row in results:
+            timeseries_data.append({
+                "bestseller_date": row.bestseller_date.strftime("%Y-%m-%d") if row.bestseller_date else None,
+                "country_code": row.country_code_bs,
+                "category": row.category,
+                "share_percentage": row.share_percentage,
+                "backfill": row.backfill,
+                "mc_products_date": row.mc_products_date.strftime("%Y-%m-%d") if row.mc_products_date else None
+            })
+            
         return jsonify({
             "success": True,
-            "data": chart_data,
-            "categories": categories_list,
+            "data": timeseries_data,
             "project_id": project_id,
-            "country": country
+            "country": countries_param
         })
         
     except Exception as e:
-        print(f"Error fetching category demand data: {str(e)}")
+        print(f"Error fetching category time series data: {str(e)}")
+        traceback.print_exc()  # Print stack trace for better debugging
         return jsonify({
             "success": False,
-            "error": f"Failed to fetch category demand data: {str(e)}"
+            "error": f"Failed to fetch category time series data: {str(e)}"
         }), 500
 
-@product_discovery_performance_bp.route("/api/performance/market-share", methods=["GET"])
+
+@product_discovery_performance_bp.route("/api/performance/rank-coverage", methods=["GET"])
 @token_required
 @project_access_required
-def get_market_share_data(current_user, cloud_project_id=None):
+def get_rank_coverage(current_user, cloud_project_id=None):
     """
-    Get market share data for the Performance dashboard.
+    Get product rank coverage data for the Performance Deep Dive dashboard.
     Required query parameters:
     - country: The country code to filter by
+    - project_id: The Firestore project ID to filter by
     Optional query parameters:
-    - categories: Comma-separated list of categories to filter by 
-      (if not provided, all categories will be included)
+    - category: The specific category to filter by
+    - date: The specific date to filter by (YYYY-MM-DD format)
     """
     try:
         # Get parameters from request
         country = request.args.get("country")
-        categories_param = request.args.get("categories")
+        category = request.args.get("category")
+        date = request.args.get("date")
         
         # Validate country parameter
         if not country:
@@ -586,135 +885,146 @@ def get_market_share_data(current_user, cloud_project_id=None):
         if not project_id:
             return jsonify({"error": "Project ID is required"}), 400
             
-        # Parse categories if provided
-        categories = []
-        if categories_param:
-            categories = categories_param.split(",")
-            
         # Create BigQuery client
         client = bigquery.Client()
         
-        # First, find the latest available date for this project/country
-        date_query = f"""
-        SELECT MAX(bestseller_date) as latest_date
-        FROM `s360-demand-sensing.web_app_logs.category_assortment_analysis`
-        WHERE project_id = '{project_id}'
-        AND country_code = '{country}'
-        """
-        
-        latest_date_results = client.query(date_query).result()
-        latest_date = None
-        
-        for row in latest_date_results:
-            latest_date = row.latest_date
-            break
-            
-        if not latest_date:
-            return jsonify({
-                "market_share": None,
-                "error": "No data available for this project/country"
-            }), 200
-            
-        # Format date as string for the query
-        latest_date_str = latest_date.strftime("%Y-%m-%d")
-            
-        # Build the main query
-        base_query = f"""
-        SELECT AVG(share_percentage) as avg_share
-        FROM `s360-demand-sensing.web_app_logs.category_assortment_analysis`
-        WHERE project_id = '{project_id}'
-        AND country_code = '{country}'
-        AND bestseller_date = '{latest_date_str}'
+        # Build the query to get rank coverage data
+        query = f"""
+        WITH performance_data AS (
+            SELECT 
+                bestseller_date,
+                category,
+                products_in_assortment,
+                products_rank_below_10,
+                products_rank_below_50,
+                products_rank_below_100,
+                products_rank_below_250,
+                products_rank_below_500,
+                products_rank_below_1000
+            FROM `s360-demand-sensing.project_performance.product_discovery_performance`
+            WHERE project_id = '{project_id}'
+            AND country_code_bs = '{country}'
         """
         
         # Add category filter if provided
-        if categories and len(categories) > 0:
-            category_conditions = ", ".join([f"'{cat.strip()}'" for cat in categories])
-            base_query += f"AND category IN ({category_conditions})"
+        if category:
+            query += f"AND category = '{category}'"
             
-        # Run the query
-        query_job = client.query(base_query)
-        results = query_job.result()
+        # Add date filter if provided
+        if date:
+            query += f"AND bestseller_date = '{date}'"
+        else:
+            # If no date specified, use the latest date
+            query += """
+            AND bestseller_date = (
+                SELECT MAX(bestseller_date) 
+                FROM `s360-demand-sensing.project_performance.product_discovery_performance`
+                WHERE project_id = '{project_id}'
+                AND country_code_bs = '{country}'
+            )
+            """
         
-        avg_share = None
-        for row in results:
-            avg_share = row.avg_share
-            break
-
-        # Return the results
-        return jsonify({
-            "market_share": avg_share,
-            "latest_date": latest_date_str,
-            "project_id": project_id,
-            "country": country,
-            "categories": categories
-        }), 200
+        # Close the CTE
+        query += """
+        )
         
-    except Exception as e:
-        app.logger.error(f"Error getting market share data: {str(e)}")
-        return jsonify({"error": f"Failed to get market share data: {str(e)}"}), 500
-
-@product_discovery_performance_bp.route("/api/assortment/category-products", methods=["GET"])
-@token_required
-@project_access_required
-def get_category_products_in_assortment(current_user, cloud_project_id=None):
-    try:
-        # Get country from query params
-        country = request.args.get("country")
-        if not country:
-            return jsonify({"error": "Country parameter is required"}), 400
-            
-        # Get project ID - use the one from the decorator or from query param
-        project_id = request.args.get("project_id", cloud_project_id)
-        if not project_id:
-            return jsonify({"error": "Project ID is required"}), 400
-            
-        # Create BigQuery client
-        client = bigquery.Client()
-        
-        # Query to get products in assortment per category across all dates
-        query = f"""
         SELECT 
+            bestseller_date,
             category,
-            MIN(bestseller_date) as start_date,
-            MAX(bestseller_date) as end_date,
-            AVG(products_in_stock) as avg_products_in_stock
-        FROM `s360-demand-sensing.web_app_logs.category_assortment_analysis`
-        WHERE project_id = '{project_id}'
-        AND country_code = '{country}'
-        GROUP BY category
-        ORDER BY avg_products_in_stock DESC
+            products_in_assortment,
+            products_rank_below_10 AS top_10,
+            products_rank_below_50 AS top_50,
+            products_rank_below_100 AS top_100,
+            products_rank_below_250 AS top_250,
+            products_rank_below_500 AS top_500,
+            products_rank_below_1000 AS top_1000,
+            -- Calculate percentages
+            SAFE_DIVIDE(products_rank_below_10, 10) AS top_10_pct,
+            SAFE_DIVIDE(products_rank_below_50, 50) AS top_50_pct,
+            SAFE_DIVIDE(products_rank_below_100, 100) AS top_100_pct,
+            SAFE_DIVIDE(products_rank_below_250, 250) AS top_250_pct,
+            SAFE_DIVIDE(products_rank_below_500, 500) AS top_500_pct,
+            SAFE_DIVIDE(products_rank_below_1000, 1000) AS top_1000_pct
+        FROM performance_data
+        ORDER BY bestseller_date DESC, category
         """
         
+        # If no specific category was provided, we'll get all categories, 
+        # so limit to just the top ones by product count
+        if not category:
+            query = f"""
+            WITH ranked_data AS ({query})
+            SELECT *
+            FROM ranked_data
+            ORDER BY products_in_assortment DESC
+            LIMIT 10
+            """
+        
+        # Run the query
         query_job = client.query(query)
         results = query_job.result()
         
-        # Process results
-        categories = []
-        products = []
-        date_range = {"start": None, "end": None}
+        # Process the results
+        coverage_data = []
         
         for row in results:
-            categories.append(row.category)
-            products.append(row.avg_products_in_stock)
+            coverage_data.append({
+                "bestseller_date": row.bestseller_date.strftime("%Y-%m-%d") if row.bestseller_date else None,
+                "category": row.category,
+                "products_in_assortment": row.products_in_assortment,
+                # Rank count values
+                "top_10": row.top_10,
+                "top_50": row.top_50,
+                "top_100": row.top_100,
+                "top_250": row.top_250,
+                "top_500": row.top_500,
+                "top_1000": row.top_1000,
+                # Percentage values
+                "top_10_pct": row.top_10_pct,
+                "top_50_pct": row.top_50_pct,
+                "top_100_pct": row.top_100_pct,
+                "top_250_pct": row.top_250_pct,
+                "top_500_pct": row.top_500_pct,
+                "top_1000_pct": row.top_1000_pct
+            })
+        
+        # Also fetch all available dates for the date filter
+        dates_query = f"""
+        SELECT DISTINCT bestseller_date
+        FROM `s360-demand-sensing.project_performance.product_discovery_performance`
+        WHERE project_id = '{project_id}'
+        AND country_code_bs = '{country}'
+        """
+        
+        if category:
+            dates_query += f"AND category = '{category}'"
             
-            # Update date range
-            if date_range["start"] is None or row.start_date < date_range["start"]:
-                date_range["start"] = row.start_date
-            if date_range["end"] is None or row.end_date > date_range["end"]:
-                date_range["end"] = row.end_date
+        dates_query += """
+        ORDER BY bestseller_date DESC
+        LIMIT 24
+        """
         
-        # Format dates as strings
-        if date_range["start"] and date_range["end"]:
-            date_range["start"] = date_range["start"].strftime("%Y-%m-%d")
-            date_range["end"] = date_range["end"].strftime("%Y-%m-%d")
+        dates_job = client.query(dates_query)
+        dates_result = dates_job.result()
         
+        available_dates = []
+        for date_row in dates_result:
+            available_dates.append(date_row.bestseller_date.strftime("%Y-%m-%d"))
+            
         return jsonify({
-            "categories": categories,
-            "products": products,
-            "dateRange": date_range
-        }), 200
-    
+            "success": True,
+            "data": coverage_data,
+            "available_dates": available_dates,
+            "project_id": project_id,
+            "country": country,
+            "category": category,
+            "date": date
+        })
+        
     except Exception as e:
-        logging.error(f"Error in get_category_products_in_assortment: {str(e)}")
-        return jsonify({"error": f"An error occurred: {str(e)}"}), 500
+        print(f"Error fetching rank coverage data: {str(e)}")
+        traceback.print_exc()  # Print stack trace for better debugging
+        return jsonify({
+            "success": False,
+            "error": f"Failed to fetch rank coverage data: {str(e)}"
+        }), 500
